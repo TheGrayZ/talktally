@@ -108,7 +108,7 @@ class AudioRecorder:
                 mic_path,
                 mode="w",
                 samplerate=cfg.sample_rate,
-                channels=len(cfg.mic_channels),
+                channels=2,
                 subtype="PCM_16",
             )
             self._t_mic = threading.Thread(
@@ -220,7 +220,10 @@ class AudioRecorder:
         sys_block = indata[:, self._cfg.system_channels]
 
         if self._q_mic is not None:
-            self._q_mic.put(mic_block.copy(), block=False)
+            mic_mono = mic_block.mean(axis=1, keepdims=True)
+            mic_stereo = np.concatenate([mic_mono, mic_mono], axis=1)
+            mic_stereo = np.clip(mic_stereo, -1.0, 1.0)
+            self._q_mic.put(mic_stereo.copy(), block=False)
         if self._q_sys is not None:
             self._q_sys.put(sys_block.copy(), block=False)
         if self._q_mix is not None:

@@ -6,7 +6,7 @@ import json
 import shlex
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
@@ -30,6 +30,8 @@ class LocalTranscriber:
     cmd: str | Sequence[str] = "whisper"
     extra_args: str | Sequence[str] = ""
     debug: Callable[[str], None] = _default_debug
+    _cmd: list[str] = field(init=False, repr=False)
+    _extra: list[str] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         import shutil
@@ -164,4 +166,3 @@ class LocalTranscriber:
             self.debug(f"stdout-tool stderr: {err}")
             raise RuntimeError(f"Transcriber failed ({proc.returncode}): {err or out}")
         return out.replace("\r", " ").replace("\n", " ").strip()
-

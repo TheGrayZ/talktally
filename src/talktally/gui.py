@@ -58,9 +58,9 @@ class TalkTallyApp(tk.Tk):
         self._apply_device_selection()
         self._fit_to_content()
         self._bind_setting_traces()
+        self._force_pynput = os.environ.get("TALKTALLY_FORCE_PYNPUT") == "1"
         if self.enable_hotkey.get():
             self._start_hotkey_listener()
-        self._force_pynput = os.environ.get("TALKTALLY_FORCE_PYNPUT") == "1"
         if getattr(self._settings, "dictation_enable", False) and not self._force_pynput:
             self._start_dictation_agent()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -531,7 +531,7 @@ class TalkTallyApp(tk.Tk):
             _dbg(f"transcription failed: {exc}")
             self.after(
                 0,
-                lambda: self._finish_transcription_error(audio_path, exc),
+                lambda err=exc: self._finish_transcription_error(audio_path, err),
             )
             return
         self.after(0, lambda: self._finish_transcription_success(result))

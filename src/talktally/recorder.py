@@ -40,10 +40,13 @@ class RecorderConfig:
     outputs: OutputSelection = field(default_factory=OutputSelection)
 
     def __post_init__(self) -> None:
+        # Default mapping for an Aggregate Device with BlackHole 2ch (system audio) + built-in mic:
+        # - System audio on channels 0 and 1 (BlackHole stereo)
+        # - Mic on channel 2
         if self.mic_channels is None:
-            self.mic_channels = [0]
+            self.mic_channels = [2]
         if self.system_channels is None:
-            self.system_channels = [1, 2]
+            self.system_channels = [0, 1]
         self.output_dir = Path(self.output_dir)
 
 

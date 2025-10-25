@@ -67,10 +67,19 @@ class Settings:
     flac_bit_depth: int = 16
     flac_level: int = 5  # 0..8
 
-    # Hotkey and alerts
+    # Hotkey and alerts (recorder)
     enable_hotkey: bool = False
     hotkey: str = "cmd+shift+r"
     play_sounds: bool = True
+
+    # Dictation (push-to-talk) feature
+    dictation_enable: bool = False
+    # Default to right Option key on macOS; token is interpreted by platform-specific code
+    dictation_hotkey: str = "right_option"
+    # Command (or absolute path) to local transcriber; 'whisper' (OpenAI) by default
+    dictation_wispr_cmd: str = "whisper"
+    # Audio capture settings for dictation
+    dictation_sample_rate: int = 16_000
 
 
 def get_settings_path() -> Path:

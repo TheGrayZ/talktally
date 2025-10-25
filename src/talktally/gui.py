@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from .recorder import AudioRecorder, RecorderConfig, OutputSelection, list_input_devices
+from .common.settings import Settings, load_settings, save_settings
 
 
 class TalkTallyApp(tk.Tk):
@@ -25,6 +26,10 @@ class TalkTallyApp(tk.Tk):
         super().__init__()
         self.title("TalkTally Recorder")
         self.resizable(True, True)
+
+        # Load persisted settings before creating UI variables
+        self._settings: Settings = load_settings()
+        self._saving_suspended: bool = False  # avoid save storms during init
 
         self.rec = AudioRecorder()
         self._overlay: Optional[tk.Toplevel] = None
@@ -36,7 +41,11 @@ class TalkTallyApp(tk.Tk):
         self._build_ui()
         self._create_overlay()
         self._refresh_devices()
+        self._apply_device_selection()
         self._fit_to_content()
+        self._bind_setting_traces()
+        if self.enable_hotkey.get():
+            self._start_hotkey_listener()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
@@ -49,7 +58,7 @@ class TalkTallyApp(tk.Tk):
         # Device selection
         dev_frame = ttk.LabelFrame(self, text="Input Device (Aggregate)")
         dev_frame.pack(fill="x", **pad)
-        self.device_var = tk.StringVar()
+        self.device_var = tk.StringVar(value=self._settings.device_name)
         self.device_cb = ttk.Combobox(
             dev_frame, textvariable=self.device_var, state="readonly"
         )
@@ -67,8 +76,8 @@ class TalkTallyApp(tk.Tk):
         ttk.Label(ch_frame, text="System channels:").grid(
             row=1, column=0, sticky="w", padx=8, pady=4
         )
-        self.mic_ch_var = tk.StringVar(value="0")
-        self.sys_ch_var = tk.StringVar(value="1,2")
+        self.mic_ch_var = tk.StringVar(value=self._settings.mic_channels)
+        self.sys_ch_var = tk.StringVar(value=self._settings.system_channels)
         ttk.Entry(ch_frame, textvariable=self.mic_ch_var, width=20).grid(
             row=0, column=1, sticky="w", padx=8, pady=4
         )
@@ -79,9 +88,9 @@ class TalkTallyApp(tk.Tk):
         # Outputs
         out_frame = ttk.LabelFrame(self, text="Outputs")
         out_frame.pack(fill="x", **pad)
-        self.var_mic = tk.BooleanVar(value=True)
-        self.var_sys = tk.BooleanVar(value=True)
-        self.var_mix = tk.BooleanVar(value=True)
+        self.var_mic = tk.BooleanVar(value=self._settings.output_mic)
+        self.var_sys = tk.BooleanVar(value=self._settings.output_system)
+        self.var_mix = tk.BooleanVar(value=self._settings.output_mixed)
         ttk.Checkbutton(out_frame, text="Mic WAV", variable=self.var_mic).grid(
             row=0, column=0, sticky="w", padx=8, pady=4
         )
@@ -101,9 +110,9 @@ class TalkTallyApp(tk.Tk):
         ttk.Label(out_frame, text="Mixed filename:").grid(
             row=2, column=1, sticky="e", padx=4
         )
-        self.var_mic_file = tk.StringVar(value="mic.wav")
-        self.var_sys_file = tk.StringVar(value="system.wav")
-        self.var_mix_file = tk.StringVar(value="mixed.wav")
+        self.var_mic_file = tk.StringVar(value=self._settings.mic_filename)
+        self.var_sys_file = tk.StringVar(value=self._settings.system_filename)
+        self.var_mix_file = tk.StringVar(value=self._settings.mixed_filename)
         ttk.Entry(out_frame, textvariable=self.var_mic_file, width=22).grid(
             row=0, column=2, sticky="w"
         )
@@ -118,7 +127,7 @@ class TalkTallyApp(tk.Tk):
         dir_frame = ttk.Frame(out_frame)
         dir_frame.grid(row=3, column=0, columnspan=3, sticky="we", padx=8, pady=6)
         ttk.Label(dir_frame, text="Output directory:").pack(side="left")
-        self.var_outdir = tk.StringVar(value=str(Path.cwd()))
+        self.var_outdir = tk.StringVar(value=self._settings.output_dir or str(Path.cwd()))
         self.entry_outdir = ttk.Entry(dir_frame, textvariable=self.var_outdir, width=44)
         self.entry_outdir.pack(side="left", padx=6)
         ttk.Button(dir_frame, text="Browse…", command=self._browse_dir).pack(
@@ -138,8 +147,8 @@ class TalkTallyApp(tk.Tk):
         # Hotkey + sounds
         extras = ttk.LabelFrame(self, text="Hotkey & Alerts")
         extras.pack(fill="x", **pad)
-        self.enable_hotkey = tk.BooleanVar(value=False)
-        self.hotkey_var = tk.StringVar(value="cmd+shift+r")
+        self.enable_hotkey = tk.BooleanVar(value=self._settings.enable_hotkey)
+        self.hotkey_var = tk.StringVar(value=self._settings.hotkey)
         ttk.Checkbutton(
             extras,
             text="Enable global hotkey",
@@ -153,7 +162,7 @@ class TalkTallyApp(tk.Tk):
         e.grid(row=0, column=2, sticky="w", padx=6)
         e.bind("<FocusOut>", lambda _e: self._restart_hotkey_if_enabled())
 
-        self.var_sounds = tk.BooleanVar(value=True)
+        self.var_sounds = tk.BooleanVar(value=self._settings.play_sounds)
         ttk.Checkbutton(
             extras, text="Play start/stop sounds", variable=self.var_sounds
         ).grid(row=1, column=0, sticky="w", padx=8, pady=4)
@@ -315,6 +324,63 @@ class TalkTallyApp(tk.Tk):
         ss = secs % 60
         self._overlay_timer_var.set(f"{mm:02d}:{ss:02d}")
         self._overlay_job = self.after(1000, self._schedule_overlay_update)
+
+    # ------- Settings binding -------
+    def _bind_setting_traces(self) -> None:
+        # Prevent floods during initial setup
+        self._saving_suspended = True
+        try:
+            def bind(var, setter):
+                var.trace_add("write", lambda *_: setter())
+
+            bind(self.device_var, lambda: self._save_field("device_name", self.device_var.get()))
+            bind(self.mic_ch_var, lambda: self._save_field("mic_channels", self.mic_ch_var.get()))
+            bind(self.sys_ch_var, lambda: self._save_field("system_channels", self.sys_ch_var.get()))
+            bind(self.var_outdir, lambda: self._save_field("output_dir", self.var_outdir.get()))
+            bind(self.var_mic_file, lambda: self._save_field("mic_filename", self.var_mic_file.get()))
+            bind(self.var_sys_file, lambda: self._save_field("system_filename", self.var_sys_file.get()))
+            bind(self.var_mix_file, lambda: self._save_field("mixed_filename", self.var_mix_file.get()))
+            bind(self.var_mic, lambda: self._save_field("output_mic", self.var_mic.get()))
+            bind(self.var_sys, lambda: self._save_field("output_system", self.var_sys.get()))
+            bind(self.var_mix, lambda: self._save_field("output_mixed", self.var_mix.get()))
+            bind(self.enable_hotkey, lambda: self._save_field("enable_hotkey", self.enable_hotkey.get()))
+            bind(self.hotkey_var, lambda: self._save_field("hotkey", self.hotkey_var.get()))
+            bind(self.var_sounds, lambda: self._save_field("play_sounds", self.var_sounds.get()))
+        finally:
+            self._saving_suspended = False
+
+    def _save_field(self, key: str, value) -> None:  # noqa: ANN001
+        if self._saving_suspended:
+            return
+        try:
+            setattr(self._settings, key, value)
+            save_settings(self._settings)
+        except Exception:
+            pass
+
+    def _update_settings_from_ui(self) -> None:
+        # Gather all fields from current UI variables
+        self._settings.device_name = self.device_var.get()
+        self._settings.mic_channels = self.mic_ch_var.get()
+        self._settings.system_channels = self.sys_ch_var.get()
+        self._settings.output_dir = self.var_outdir.get()
+        self._settings.mic_filename = self.var_mic_file.get()
+        self._settings.system_filename = self.var_sys_file.get()
+        self._settings.mixed_filename = self.var_mix_file.get()
+        self._settings.output_mic = self.var_mic.get()
+        self._settings.output_system = self.var_sys.get()
+        self._settings.output_mixed = self.var_mix.get()
+        self._settings.enable_hotkey = self.enable_hotkey.get()
+        self._settings.hotkey = self.hotkey_var.get()
+        self._settings.play_sounds = self.var_sounds.get()
+
+    def _apply_device_selection(self) -> None:
+        # Ensure device combobox reflects saved value when available
+        cur = self._settings.device_name
+        names = list(self.device_cb["values"]) or []
+        if cur and cur in names:
+            self.device_cb.set(cur)
+
 
     # ------- Hotkey -------
     def _toggle_hotkey_listener(self) -> None:
@@ -558,6 +624,13 @@ class TalkTallyApp(tk.Tk):
 
     # ------- Lifecycle -------
     def _on_close(self) -> None:
+        # Persist latest settings (including geometry) before closing
+        try:
+            self._update_settings_from_ui()
+            save_settings(self._settings)
+        except Exception:
+            pass
+
         self._stop_hotkey_listener()
         try:
             if self.rec.is_running():

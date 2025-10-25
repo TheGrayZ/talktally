@@ -8,6 +8,9 @@ Features:
 """
 from __future__ import annotations
 
+import os
+import sys
+import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
@@ -274,12 +277,24 @@ class TalkTallyApp(tk.Tk):
             self._start_hotkey_listener()
 
     def _start_hotkey_listener(self) -> None:
+        # Prefer a Quartz-based listener on macOS to avoid TIS calls on background threads
+        use_pynput = os.environ.get("TALKTALLY_FORCE_PYNPUT") == "1" or sys.platform != "darwin"
+
+        if not use_pynput and sys.platform == "darwin":
+            try:
+                self._start_quartz_hotkey()
+                return
+            except Exception:
+                # Fall back to pynput if Quartz path fails
+                pass
+
+        # Fallback: pynput GlobalHotKeys
         try:
             from pynput import keyboard  # type: ignore
         except Exception:
             messagebox.showwarning(
                 "Hotkey unavailable",
-                "Global hotkeys require the 'pynput' package and macOS Accessibility permission.\n"
+                "Global hotkeys require 'pynput' or macOS Quartz bindings.\n"
                 "Install with: pip install pynput",
             )
             self.enable_hotkey.set(False)
@@ -287,20 +302,26 @@ class TalkTallyApp(tk.Tk):
 
         if self._hotkey_listener is not None:
             try:
-                self._hotkey_listener.stop()
+                # Support both custom and pynput listeners
+                stop = getattr(self._hotkey_listener, "stop", None)
+                if callable(stop):
+                    stop()
             except Exception:
                 pass
             self._hotkey_listener = None
 
         hotkey_str = self.hotkey_var.get().strip() or "cmd+shift+r"
-        mapping = {self._format_pynput_hotkey(hotkey_str): self._toggle}
+        # Ensure Tkinter interactions happen on the main thread; pynput callbacks run in a worker thread
+        mapping = {self._format_pynput_hotkey(hotkey_str): (lambda: self.after(0, self._toggle))}
         self._hotkey_listener = keyboard.GlobalHotKeys(mapping)
         self._hotkey_listener.start()
 
     def _stop_hotkey_listener(self) -> None:
         if self._hotkey_listener is not None:
             try:
-                self._hotkey_listener.stop()
+                stop = getattr(self._hotkey_listener, "stop", None)
+                if callable(stop):
+                    stop()
             except Exception:
                 pass
             self._hotkey_listener = None
@@ -321,6 +342,113 @@ class TalkTallyApp(tk.Tk):
             else:
                 out.append(p)
         return "+".join(out)
+
+    # ------- macOS Quartz hotkey (fallback-free, avoids TIS on worker threads) -------
+    def _start_quartz_hotkey(self) -> None:
+        try:
+            import Quartz  # type: ignore
+        except Exception:
+            raise
+
+        hotkey = (self.hotkey_var.get().strip() or "cmd+shift+r").lower().replace(" ", "")
+        mods_required: int = 0
+        key_required: Optional[int] = None
+
+        MODS = {
+            "cmd": Quartz.kCGEventFlagMaskCommand,
+            "command": Quartz.kCGEventFlagMaskCommand,
+            "meta": Quartz.kCGEventFlagMaskCommand,
+            "ctrl": Quartz.kCGEventFlagMaskControl,
+            "control": Quartz.kCGEventFlagMaskControl,
+            "alt": Quartz.kCGEventFlagMaskAlternate,
+            "option": Quartz.kCGEventFlagMaskAlternate,
+            "shift": Quartz.kCGEventFlagMaskShift,
+        }
+
+        # mac virtual keycodes for a-z and 0-9
+        KEYCODES = {
+            "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9,
+            "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17,
+            "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "9": 25, "7": 26, "8": 28, "0": 29,
+            "o": 31, "u": 32, "i": 34, "p": 35, "l": 37, "j": 38, "k": 40, "n": 45, "m": 46,
+        }
+
+        parts = [p for p in hotkey.split("+") if p]
+        for p in parts:
+            if p in MODS:
+                mods_required |= MODS[p]
+            elif p in KEYCODES:
+                key_required = KEYCODES[p]
+            else:
+                raise ValueError(f"Unsupported hotkey token: {p}")
+
+        if key_required is None:
+            raise ValueError("Hotkey must include a non-modifier key, e.g. 'r'")
+
+        fired = {"value": False}
+
+        def callback(proxy, type_, event, refcon):  # noqa: ANN001
+            try:
+                if type_ == Quartz.kCGEventKeyDown:
+                    flags = Quartz.CGEventGetFlags(event)
+                    kc = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
+                    if (flags & mods_required) == mods_required and kc == key_required:
+                        if not fired["value"]:
+                            fired["value"] = True
+                            # back to Tk main thread
+                            self.after(0, self._toggle)
+                elif type_ == Quartz.kCGEventKeyUp:
+                    kc = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
+                    if kc == key_required:
+                        fired["value"] = False
+            except Exception:
+                pass
+            return event
+
+        mask = (
+            (1 << Quartz.kCGEventKeyDown)
+            | (1 << Quartz.kCGEventKeyUp)
+        )
+
+        tap = Quartz.CGEventTapCreate(
+            Quartz.kCGSessionEventTap,
+            Quartz.kCGHeadInsertEventTap,
+            Quartz.kCGEventTapOptionListenOnly,
+            mask,
+            callback,
+            None,
+        )
+        if not tap:
+            raise RuntimeError("Failed to create event tap; check Accessibility permissions in System Settings")
+
+        run_loop_source = Quartz.CFMachPortCreateRunLoopSource(None, tap, 0)
+
+        def run_loop_thread() -> None:
+            rl = Quartz.CFRunLoopGetCurrent()
+            Quartz.CFRunLoopAddSource(rl, run_loop_source, Quartz.kCFRunLoopCommonModes)
+            Quartz.CGEventTapEnable(tap, True)
+            Quartz.CFRunLoopRun()
+
+        t = threading.Thread(target=run_loop_thread, name="HotkeyQuartz", daemon=True)
+        t.start()
+
+        class _QuartzListener:
+            def stop(self_nonlocal) -> None:  # noqa: ANN001
+                try:
+                    Quartz.CGEventTapEnable(tap, False)
+                except Exception:
+                    pass
+                try:
+                    Quartz.CFRunLoopSourceInvalidate(run_loop_source)
+                except Exception:
+                    pass
+                # Best effort: post a stop to the thread's run loop
+                try:
+                    Quartz.CFRunLoopStop(Quartz.CFRunLoopGetCurrent())
+                except Exception:
+                    pass
+
+        self._hotkey_listener = _QuartzListener()
 
     # ------- Sounds -------
     def _play_sound(self, name: str) -> None:

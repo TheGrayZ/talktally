@@ -19,7 +19,5 @@ dist/
 .pytest_cache/
 .ruff_cache/
 
-# Local audio artifacts at repo root
-/mic.wav
-/system.wav
-/mixed.wav
+# Audio files - exclude all .wav files throughout repository
+*.wav

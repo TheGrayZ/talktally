@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
@@ -63,3 +64,9 @@ def test_transcribe_recording_writes_text(monkeypatch, tmp_path: Path) -> None:
     assert result.output_path.read_text() == "hello world"
     assert captured["path"] == audio
     assert captured["init"]["kwargs"]["model"] == "tiny"
+    assert result.model == "tiny"
+    meta_path = result.output_path.with_suffix(result.output_path.suffix + ".meta.json")
+    assert meta_path.exists()
+    meta = json.loads(meta_path.read_text())
+    assert meta["model"] == "tiny"
+    assert meta["source"] == "example.wav"

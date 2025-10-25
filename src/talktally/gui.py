@@ -9,6 +9,7 @@ Features:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -57,6 +58,9 @@ class TalkTallyApp(tk.Tk):
         self._settings: Settings = load_settings()
         self._saving_suspended: bool = False  # avoid save storms during init
 
+        self._scroll_canvas: tk.Canvas | None = None
+        self._scroll_window: int | None = None
+
         self.rec = AudioRecorder()
         self._overlay: Optional[tk.Toplevel] = None
         self._overlay_timer_var = tk.StringVar(value="00:00")
@@ -65,7 +69,8 @@ class TalkTallyApp(tk.Tk):
         self._hotkey_listener = None  # type: ignore[assignment]
         self._dictation: object | None = None
 
-        self._build_ui()
+        content_root = self._create_scrollable_root()
+        self._build_ui(content_root)
         self._create_overlay()
         self._refresh_devices()
         self._apply_device_selection()
@@ -78,15 +83,16 @@ class TalkTallyApp(tk.Tk):
             self._start_dictation_agent()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def _build_ui(self) -> None:
+    def _build_ui(self, parent: tk.Widget) -> None:
         pad = {"padx": 8, "pady": 6}
+        root = parent
 
         # Record button styling
         style = ttk.Style(self)
         style.configure("Record.TButton", font=("Helvetica", 14), padding=8)
 
         # Device selection
-        dev_frame = ttk.LabelFrame(self, text="Input Device (Aggregate)")
+        dev_frame = ttk.LabelFrame(root, text="Input Device (Aggregate)")
         dev_frame.pack(fill="x", **pad)
         self.device_var = tk.StringVar(value=self._settings.device_name)
         self.device_cb = ttk.Combobox(
@@ -101,7 +107,7 @@ class TalkTallyApp(tk.Tk):
         # Channel mapping
         self.mic_ch_var = tk.StringVar(value=self._settings.mic_channels)
         self.sys_ch_var = tk.StringVar(value=self._settings.system_channels)
-        ch_frame = ttk.LabelFrame(self, text="Channel Mapping")
+        ch_frame = ttk.LabelFrame(root, text="Channel Mapping")
         ch_frame.pack(fill="x", **pad)
         ch_frame.columnconfigure(1, weight=1)
         ch_frame.columnconfigure(3, weight=1)
@@ -138,7 +144,7 @@ class TalkTallyApp(tk.Tk):
         ).grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 6))
 
         # Outputs
-        out_frame = ttk.LabelFrame(self, text="Output Settings")
+        out_frame = ttk.LabelFrame(root, text="Output Settings")
         out_frame.pack(fill="x", **pad)
         self.var_mic = tk.BooleanVar(value=self._settings.output_mic)
         self.var_sys = tk.BooleanVar(value=self._settings.output_system)
@@ -260,7 +266,7 @@ class TalkTallyApp(tk.Tk):
         self._refresh_channel_selectors()
 
         # Record button + status
-        ctrl = ttk.Frame(self)
+        ctrl = ttk.Frame(root)
         ctrl.pack(fill="x", **pad)
         self.btn = ttk.Button(
             ctrl, text="🔴 Record", style="Record.TButton", command=self._toggle
@@ -275,7 +281,7 @@ class TalkTallyApp(tk.Tk):
         model_choices = list(WHISPER_MODELS)
         if current_model not in model_choices:
             model_choices.append(current_model)
-        model_frame = ttk.LabelFrame(self, text="Model Settings")
+        model_frame = ttk.LabelFrame(root, text="Model Settings")
         model_frame.pack(fill="x", **pad)
         model_frame.columnconfigure(1, weight=1)
         ttk.Label(model_frame, text="Whisper model:").grid(
@@ -308,7 +314,7 @@ class TalkTallyApp(tk.Tk):
             value=getattr(self._settings, "dictation_wispr_cmd", "whisper")
         )
 
-        hotkey_frame = ttk.LabelFrame(self, text="Hotkey & Dictation")
+        hotkey_frame = ttk.LabelFrame(root, text="Hotkey & Dictation")
         hotkey_frame.pack(fill="x", **pad)
         hotkey_frame.columnconfigure(2, weight=1)
         ttk.Checkbutton(
@@ -358,9 +364,76 @@ class TalkTallyApp(tk.Tk):
         ).grid(row=3, column=1, columnspan=2, sticky="w", padx=6, pady=4)
 
         # Transcription panel
-        trans_section = ttk.LabelFrame(self, text="Transcribe Recordings")
+        trans_section = ttk.LabelFrame(root, text="Transcribe Recordings")
         trans_section.pack(fill="both", expand=True, **pad)
         self._build_transcription_panel(trans_section)
+
+    def _create_scrollable_root(self) -> ttk.Frame:
+        container = ttk.Frame(self)
+        container.pack(fill="both", expand=True)
+        canvas = tk.Canvas(container, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        frame = ttk.Frame(canvas)
+        window = canvas.create_window((0, 0), window=frame, anchor="nw")
+
+        def _sync_scrollregion(event: tk.Event) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _sync_width(event: tk.Event) -> None:
+            canvas.itemconfigure(window, width=event.width)
+
+        self._scroll_canvas = canvas
+        self._scroll_window = window
+        frame.bind("<Configure>", _sync_scrollregion)
+        canvas.bind("<Configure>", _sync_width)
+        self._bind_mousewheel()
+        return frame
+
+    def _bind_mousewheel(self) -> None:
+        canvas = self._scroll_canvas
+        if canvas is None:
+            return
+        root = canvas.winfo_toplevel()
+        root.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
+        root.bind_all("<Button-4>", self._on_mousewheel, add="+")
+        root.bind_all("<Button-5>", self._on_mousewheel, add="+")
+
+    def _unbind_mousewheel(self) -> None:
+        canvas = self._scroll_canvas
+        if canvas is None:
+            return
+        root = canvas.winfo_toplevel()
+        root.unbind_all("<MouseWheel>")
+        root.unbind_all("<Button-4>")
+        root.unbind_all("<Button-5>")
+
+    def _on_mousewheel(self, event: tk.Event) -> None:
+        canvas = self._scroll_canvas
+        if canvas is None:
+            return
+        delta = getattr(event, "delta", 0)
+        if delta == 0 and hasattr(event, "num"):
+            if event.num == 4:
+                delta = 120
+            elif event.num == 5:
+                delta = -120
+        if delta == 0:
+            direction = 0
+        elif sys.platform == "darwin":
+            direction = -1 if delta > 0 else 1
+        else:
+            direction = -int(delta / 120)
+        if delta == 0 and hasattr(event, "num"):
+            if getattr(event, "num") == 4:
+                direction = -1
+            elif getattr(event, "num") == 5:
+                direction = 1
+        if direction == 0:
+            direction = -1 if delta > 0 else 1
+        canvas.yview_scroll(direction, "units")
 
     def _build_transcription_panel(self, parent: tk.Widget) -> None:
         container = ttk.Frame(parent)
@@ -379,17 +452,21 @@ class TalkTallyApp(tk.Tk):
             side="left", padx=(6, 0)
         )
 
-        list_frame = ttk.Frame(container)
-        list_frame.grid(row=1, column=0, sticky="nsew", padx=12)
-        list_frame.columnconfigure(0, weight=1)
-        list_frame.rowconfigure(0, weight=1)
+        paned = ttk.Panedwindow(container, orient="horizontal")
+        paned.grid(row=1, column=0, sticky="nsew", padx=12)
 
+        recordings_frame = ttk.Frame(paned)
+        recordings_frame.columnconfigure(0, weight=1)
+        recordings_frame.rowconfigure(1, weight=1)
+        ttk.Label(recordings_frame, text="Recordings").grid(
+            row=0, column=0, sticky="w", pady=(0, 4)
+        )
         columns = ("name", "modified", "size")
         self.transcription_tree = ttk.Treeview(
-            list_frame,
+            recordings_frame,
             columns=columns,
             show="headings",
-            height=6,
+            height=8,
             selectmode="browse",
         )
         self.transcription_tree.heading("name", text="File")
@@ -399,11 +476,11 @@ class TalkTallyApp(tk.Tk):
         self.transcription_tree.column("modified", width=140, anchor="center")
         self.transcription_tree.column("size", width=80, anchor="e")
         vsb = ttk.Scrollbar(
-            list_frame, orient="vertical", command=self.transcription_tree.yview
+            recordings_frame, orient="vertical", command=self.transcription_tree.yview
         )
         self.transcription_tree.configure(yscrollcommand=vsb.set)
-        self.transcription_tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
+        self.transcription_tree.grid(row=1, column=0, sticky="nsew")
+        vsb.grid(row=1, column=1, sticky="ns")
         self.transcription_tree.bind(
             "<<TreeviewSelect>>", lambda _e: self._on_transcription_select()
         )
@@ -411,8 +488,51 @@ class TalkTallyApp(tk.Tk):
             "<Double-1>", lambda _e: self._start_transcription()
         )
         self._transcription_index: dict[str, Path] = {}
+        paned.add(recordings_frame, weight=1)
+
+        transcripts_frame = ttk.Frame(paned)
+        transcripts_frame.columnconfigure(0, weight=1)
+        transcripts_frame.rowconfigure(1, weight=1)
+        ttk.Label(transcripts_frame, text="Transcripts").grid(
+            row=0, column=0, sticky="w", pady=(0, 4)
+        )
+        t_columns = ("name", "model", "modified")
+        self.transcript_tree = ttk.Treeview(
+            transcripts_frame,
+            columns=t_columns,
+            show="headings",
+            height=8,
+            selectmode="browse",
+        )
+        self.transcript_tree.heading("name", text="Transcript")
+        self.transcript_tree.heading("model", text="Model")
+        self.transcript_tree.heading("modified", text="Modified")
+        self.transcript_tree.column("name", width=200, anchor="w")
+        self.transcript_tree.column("model", width=100, anchor="center")
+        self.transcript_tree.column("modified", width=140, anchor="center")
+        t_vsb = ttk.Scrollbar(
+            transcripts_frame, orient="vertical", command=self.transcript_tree.yview
+        )
+        self.transcript_tree.configure(yscrollcommand=t_vsb.set)
+        self.transcript_tree.grid(row=1, column=0, sticky="nsew")
+        t_vsb.grid(row=1, column=1, sticky="ns")
+        self.transcript_tree.bind(
+            "<<TreeviewSelect>>", lambda _e: self._on_transcript_select()
+        )
+        self.transcript_tree.bind("<Double-1>", lambda _e: self._open_transcript())
+        self._transcript_index: dict[str, Path] = {}
+        self._transcript_meta: dict[Path, dict[str, object]] = {}
+        self._transcript_rows: dict[Path, str] = {}
+        self.transcript_model_var = tk.StringVar(value="Model: —")
+        ttk.Label(
+            transcripts_frame, textvariable=self.transcript_model_var, anchor="w"
+        ).grid(row=2, column=0, columnspan=2, sticky="we", pady=(4, 0))
+        paned.add(transcripts_frame, weight=1)
+
         self._transcription_thread: threading.Thread | None = None
+        self._transcription_running: bool = False
         self._last_transcript_path: Path | None = None
+        self._last_transcript_model: str | None = None
 
         actions = ttk.Frame(container)
         actions.grid(row=2, column=0, sticky="we", pady=6, padx=12)
@@ -455,7 +575,7 @@ class TalkTallyApp(tk.Tk):
         text_frame.rowconfigure(0, weight=1)
         self.transcription_text = tk.Text(
             text_frame,
-            height=10,
+            height=12,
             wrap="word",
             state="disabled",
             font=("Helvetica", 12),
@@ -567,12 +687,16 @@ class TalkTallyApp(tk.Tk):
         if not hasattr(self, "transcription_tree"):
             return
         directory = Path(self.var_outdir.get()).expanduser()
-        files = list_recordings(directory)
+
+        # Refresh recordings list
+        recordings = list_recordings(directory)
+        current_recording = self._get_selected_recording()
         tree = self.transcription_tree
         for item in tree.get_children():
             tree.delete(item)
         self._transcription_index.clear()
-        for path in files:
+        to_select: str | None = None
+        for path in recordings:
             try:
                 stat = path.stat()
                 modified = self._format_mtime(stat.st_mtime)
@@ -580,27 +704,94 @@ class TalkTallyApp(tk.Tk):
             except Exception:
                 modified = "?"
                 size = "?"
-            iid = tree.insert(
-                "",
-                "end",
-                values=(path.name, modified, size),
-            )
+            iid = tree.insert("", "end", values=(path.name, modified, size))
             self._transcription_index[iid] = path
-        if files:
-            first = tree.get_children()[0]
-            tree.selection_set(first)
-            tree.focus(first)
-            self.transcription_status_var.set("Select a recording to transcribe.")
-        else:
-            self.transcription_status_var.set(
-                "No recordings found in the output folder."
+            if current_recording is not None and path == current_recording:
+                to_select = iid
+        if recordings:
+            if to_select is None:
+                to_select = tree.get_children()[0]
+            tree.selection_set(to_select)
+            tree.focus(to_select)
+            tree.see(to_select)
+            self._set_transcription_status(
+                "Select a recording to transcribe.", preserve_when_running=True
             )
+        else:
+            self._set_transcription_status(
+                "No recordings found in the output folder.", preserve_when_running=True
+            )
+
+        # Refresh transcript list
+        if hasattr(self, "transcript_tree"):
+            transcripts = sorted(
+                (
+                    p
+                    for p in directory.glob("*.txt")
+                    if p.is_file()
+                ),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            selected_transcript = self._get_selected_transcript()
+            desired_transcript = None
+            if self._last_transcript_path and self._last_transcript_path.exists():
+                desired_transcript = self._last_transcript_path
+            elif selected_transcript is not None:
+                desired_transcript = selected_transcript
+
+            t_tree = self.transcript_tree
+            for item in t_tree.get_children():
+                t_tree.delete(item)
+            self._transcript_index.clear()
+            if hasattr(self, "_transcript_rows"):
+                self._transcript_rows.clear()
+            else:
+                self._transcript_rows = {}
+            self._transcript_meta.clear()
+
+            for path in transcripts:
+                meta = self._load_transcript_meta(path)
+                self._transcript_meta[path] = meta
+                model_value = meta.get("model")
+                if isinstance(model_value, str):
+                    model_text = model_value or "—"
+                elif model_value is None:
+                    model_text = "—"
+                else:
+                    model_text = str(model_value)
+                try:
+                    modified = self._format_mtime(path.stat().st_mtime)
+                except Exception:
+                    modified = "?"
+                iid = t_tree.insert(
+                    "",
+                    "end",
+                    values=(path.name, model_text, modified),
+                )
+                self._transcript_index[iid] = path
+                self._transcript_rows[path] = iid
+
+            if transcripts:
+                target = None
+                if desired_transcript and desired_transcript in transcripts:
+                    target = desired_transcript
+                else:
+                    target = transcripts[0]
+                self._select_transcript_path(target, show=False)
+                self._display_transcript(target)
+            else:
+                self._select_transcript_path(None, show=False)
+                self._clear_transcript_preview()
+
         self._update_transcription_buttons()
 
     def _on_transcription_select(self) -> None:
         path = self._get_selected_recording()
         if path is not None:
-            self.transcription_status_var.set(f"Ready to transcribe {path.name}.")
+            self._set_transcription_status(
+                f"Ready to transcribe {path.name}.", preserve_when_running=True
+            )
         self._update_transcription_buttons()
 
     def _get_selected_recording(self) -> Path | None:
@@ -611,18 +802,91 @@ class TalkTallyApp(tk.Tk):
             return None
         return self._transcription_index.get(selection[0])
 
+    def _get_selected_transcript(self) -> Path | None:
+        if not hasattr(self, "transcript_tree"):
+            return None
+        selection = self.transcript_tree.selection()
+        if not selection:
+            return None
+        return self._transcript_index.get(selection[0])
+
+    def _select_transcript_path(self, path: Path | None, *, show: bool = True) -> None:
+        if not hasattr(self, "transcript_tree"):
+            return
+        tree = self.transcript_tree
+        tree.selection_remove(tree.selection())
+        if path is None:
+            if show:
+                self._clear_transcript_preview()
+            return
+        iid = self._transcript_rows.get(path)
+        if iid:
+            tree.selection_set(iid)
+            tree.focus(iid)
+            tree.see(iid)
+            if show:
+                self._display_transcript(path)
+
+    def _on_transcript_select(self) -> None:
+        path = self._get_selected_transcript()
+        if path is None:
+            self._clear_transcript_preview()
+            self._update_transcription_buttons()
+            return
+        self._display_transcript(path)
+
+    def _display_transcript(self, path: Path) -> None:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            text = ""
+        self._show_transcription_text(text)
+        meta = self._transcript_meta.get(path)
+        if meta is None:
+            meta = self._load_transcript_meta(path)
+            self._transcript_meta[path] = meta
+        model_value = meta.get("model")
+        if isinstance(model_value, str):
+            model = model_value or "—"
+        elif model_value is None:
+            model = "—"
+        else:
+            model = str(model_value)
+        self.transcript_model_var.set(f"Model: {model}")
+        self._last_transcript_path = path
+        self._last_transcript_model = model if model != "—" else None
+        self._set_transcription_status(
+            f"Showing transcript {path.name}.", preserve_when_running=True
+        )
+        self._update_transcription_buttons()
+
+    def _load_transcript_meta(self, path: Path) -> dict[str, object]:
+        meta_path = path.with_suffix(path.suffix + ".meta.json")
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {str(k): v for k, v in data.items() if isinstance(k, str)}
+        except Exception:
+            pass
+        return {}
+
+    def _clear_transcript_preview(self) -> None:
+        self._show_transcription_text("")
+        self.transcript_model_var.set("Model: —")
+        self._last_transcript_path = None
+        self._last_transcript_model = None
+
     def _start_transcription(self) -> None:
         if not hasattr(self, "transcription_tree"):
             return
-        if self._transcription_thread is not None and self._transcription_thread.is_alive():
+        if self._is_transcription_running():
             return
         path = self._get_selected_recording()
         if path is None:
             messagebox.showinfo("No recording", "Select a recording first.")
             return
-        self._last_transcript_path = None
-        self._show_transcription_text("")
-        self.transcription_status_var.set(f"Transcribing {path.name}…")
+        self._clear_transcript_preview()
+        self._set_transcription_status(f"Transcribing {path.name}…")
         self._set_transcription_running(True)
         thread = threading.Thread(
             target=self._run_transcription_thread,
@@ -657,20 +921,25 @@ class TalkTallyApp(tk.Tk):
         text = result.transcript or ""
         self._show_transcription_text(text)
         self._last_transcript_path = result.output_path
+        self._last_transcript_model = result.model
+        self.transcript_model_var.set(
+            f"Model: {result.model}" if result.model else "Model: —"
+        )
         if result.output_path and result.output_path.exists():
-            self.transcription_status_var.set(
+            self._set_transcription_status(
                 f"Transcript saved to {result.output_path.name}"
             )
         elif text:
-            self.transcription_status_var.set("Transcript ready (not saved).")
+            self._set_transcription_status("Transcript ready (not saved).")
         else:
-            self.transcription_status_var.set("Transcript appears to be empty.")
+            self._set_transcription_status("Transcript appears to be empty.")
+        self._refresh_transcription_list()
         self._update_transcription_buttons()
 
     def _finish_transcription_error(self, audio_path: Path, error: Exception) -> None:
         self._transcription_thread = None
         self._set_transcription_running(False)
-        self.transcription_status_var.set(f"Transcription failed: {error}")
+        self._set_transcription_status(f"Transcription failed: {error}")
         messagebox.showerror(
             "Transcription failed",
             f"Could not transcribe '{audio_path.name}':\n{error}",
@@ -678,6 +947,7 @@ class TalkTallyApp(tk.Tk):
         self._update_transcription_buttons()
 
     def _set_transcription_running(self, running: bool) -> None:
+        self._transcription_running = running
         if running:
             self.transcription_progress.start(12)
             self.btn_transcribe.configure(state="disabled")
@@ -692,10 +962,7 @@ class TalkTallyApp(tk.Tk):
     def _update_transcription_buttons(self) -> None:
         if not hasattr(self, "btn_transcribe"):
             return
-        running = (
-            self._transcription_thread is not None
-            and self._transcription_thread.is_alive()
-        )
+        running = self._is_transcription_running()
         has_selection = self._get_selected_recording() is not None
         self.btn_transcribe.configure(
             state="normal" if has_selection and not running else "disabled"
@@ -704,7 +971,7 @@ class TalkTallyApp(tk.Tk):
         self.btn_copy_transcript.configure(
             state="normal" if has_text and not running else "disabled"
         )
-        path = self._last_transcript_path
+        path = self._get_selected_transcript() or self._last_transcript_path
         self.btn_open_transcript.configure(
             state="normal"
             if (not running and path is not None and path.exists())
@@ -732,10 +999,18 @@ class TalkTallyApp(tk.Tk):
             return
         self.clipboard_clear()
         self.clipboard_append(text)
-        self.transcription_status_var.set("Transcript copied to clipboard.")
+        path = self._get_selected_transcript() or self._last_transcript_path
+        if path:
+            self._set_transcription_status(
+                f"Transcript copied from {path.name}.", preserve_when_running=True
+            )
+        else:
+            self._set_transcription_status(
+                "Transcript copied to clipboard.", preserve_when_running=True
+            )
 
     def _open_transcript(self) -> None:
-        path = self._last_transcript_path
+        path = self._get_selected_transcript() or self._last_transcript_path
         if path is None or not path.exists():
             messagebox.showinfo("Transcript unavailable", "Generate a transcript first.")
             return
@@ -758,6 +1033,19 @@ class TalkTallyApp(tk.Tk):
             return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
         except Exception:
             return "?"
+
+    def _is_transcription_running(self) -> bool:
+        if self._transcription_running:
+            return True
+        thread = self._transcription_thread
+        return thread is not None and thread.is_alive()
+
+    def _set_transcription_status(
+        self, message: str, *, preserve_when_running: bool = False
+    ) -> None:
+        if preserve_when_running and self._is_transcription_running():
+            return
+        self.transcription_status_var.set(message)
 
     @staticmethod
     def _format_bytes(size: int) -> str:
@@ -1524,6 +1812,7 @@ class TalkTallyApp(tk.Tk):
             self._stop_dictation_agent()
         except Exception:
             pass
+        self._unbind_mousewheel()
         self.destroy()
 
 

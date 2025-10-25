@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -29,6 +31,7 @@ class RecordingTranscriptionResult:
     source: Path
     transcript: str
     output_path: Path | None
+    model: str | None = None
 
 
 def transcribe_recording(
@@ -60,8 +63,19 @@ def transcribe_recording(
         if not overwrite and output.exists():
             raise FileExistsError(str(output))
         output.write_text(text, encoding="utf-8")
+        try:
+            metadata = {
+                "model": model,
+                "source": audio_path.name,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            meta_path = output.with_suffix(output.suffix + ".meta.json")
+            meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        except Exception:
+            pass
     return RecordingTranscriptionResult(
         source=audio_path,
         transcript=text,
         output_path=output,
+        model=model,
     )

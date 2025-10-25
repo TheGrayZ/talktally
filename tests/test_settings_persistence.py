@@ -38,12 +38,14 @@ def test_unknown_keys_are_ignored(tmp_path: Path, monkeypatch) -> None:
     # Write a file with extra keys and wrong-typed values
     settings_file.parent.mkdir(parents=True, exist_ok=True)
     settings_file.write_text(
-        json.dumps({
-            "device_name": "Dev",
-            "output_mic": True,
-            "unknown_key": 123,
-            "mic_filename": 42,  # wrong type; should fallback to default
-        })
+        json.dumps(
+            {
+                "device_name": "Dev",
+                "output_mic": True,
+                "unknown_key": 123,
+                "mic_filename": 42,  # wrong type; should fallback to default
+            }
+        )
     )
 
     s = load_settings()

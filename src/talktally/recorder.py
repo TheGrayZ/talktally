@@ -17,6 +17,7 @@ import sounddevice as sd
 import soundfile as sf
 
 from .common.fs import unique_path, prefixed_with_end_timestamp
+from .common.encoding import replace_extension
 
 
 # Sentinel used to signal writer threads to finish after draining
@@ -42,6 +43,10 @@ class RecorderConfig:
     system_filename: str = "system.wav"
     mixed_filename: str = "mixed.wav"
     outputs: OutputSelection = field(default_factory=OutputSelection)
+    # Encoding/format
+    file_format: str = "wav"  # wav|mp3|flac
+    wav_bit_depth: int = 16
+    mp3_bitrate_kbps: int = 192
 
     def __post_init__(self) -> None:
         # Default mapping for an Aggregate Device with BlackHole 2ch (system audio) + built-in mic:
@@ -82,10 +87,14 @@ class AudioRecorder:
         self._f_mix: Optional[sf.SoundFile] = None
         self._start_time: Optional[float] = None
 
-        # Paths of open output files (for post-stop renaming)
+        # Paths of output files
         self._p_mic: Optional[Path] = None
         self._p_sys: Optional[Path] = None
         self._p_mix: Optional[Path] = None
+        # Temp WAV paths for mp3 conversion
+        self._tmp_mic: Optional[Path] = None
+        self._tmp_sys: Optional[Path] = None
+        self._tmp_mix: Optional[Path] = None
 
         self._cfg: Optional[RecorderConfig] = None
 
@@ -104,17 +113,42 @@ class AudioRecorder:
             )
 
         # Prepare queues and files based on selection
-        if cfg.outputs.mic:
-            self._q_mic = queue.Queue(maxsize=100)
-            mic_path = unique_path(cfg.output_dir / cfg.mic_filename)
-            self._p_mic = Path(mic_path)
-            self._f_mic = sf.SoundFile(
-                mic_path,
+        import shutil
+
+        def _open_soundfile(path: Path, channels: int) -> sf.SoundFile:
+            subtype = "PCM_24" if cfg.wav_bit_depth >= 24 else "PCM_16"
+            return sf.SoundFile(
+                str(path),
                 mode="w",
                 samplerate=cfg.sample_rate,
-                channels=2,
-                subtype="PCM_16",
+                channels=channels,
+                subtype=subtype,
             )
+
+        def _final_path(name: str, ext: str) -> Path:
+            return unique_path(cfg.output_dir / replace_extension(name, ext))
+
+        # Determine extension by format
+        if cfg.file_format == "wav":
+            ext = ".wav"
+        elif cfg.file_format == "flac":
+            ext = ".flac"
+        elif cfg.file_format == "mp3":
+            ext = ".mp3"
+            if shutil.which("ffmpeg") is None:
+                raise RuntimeError("MP3 export requires ffmpeg installed and on PATH")
+        else:
+            raise ValueError(f"Unsupported file format: {cfg.file_format}")
+
+        if cfg.outputs.mic:
+            self._q_mic = queue.Queue(maxsize=100)
+            final = _final_path(cfg.mic_filename, ext)
+            self._p_mic = final
+            if cfg.file_format == "mp3":
+                self._tmp_mic = unique_path(final.with_suffix(".tmp.wav"))
+                self._f_mic = _open_soundfile(self._tmp_mic, channels=2)
+            else:
+                self._f_mic = _open_soundfile(final, channels=2)
             self._t_mic = threading.Thread(
                 target=self._writer, args=(self._q_mic, self._f_mic), daemon=False
             )
@@ -122,15 +156,14 @@ class AudioRecorder:
 
         if cfg.outputs.system:
             self._q_sys = queue.Queue(maxsize=100)
-            sys_path = unique_path(cfg.output_dir / cfg.system_filename)
-            self._p_sys = Path(sys_path)
-            self._f_sys = sf.SoundFile(
-                sys_path,
-                mode="w",
-                samplerate=cfg.sample_rate,
-                channels=len(cfg.system_channels),
-                subtype="PCM_16",
-            )
+            channels = len(cfg.system_channels)
+            final = _final_path(cfg.system_filename, ext)
+            self._p_sys = final
+            if cfg.file_format == "mp3":
+                self._tmp_sys = unique_path(final.with_suffix(".tmp.wav"))
+                self._f_sys = _open_soundfile(self._tmp_sys, channels=channels)
+            else:
+                self._f_sys = _open_soundfile(final, channels=channels)
             self._t_sys = threading.Thread(
                 target=self._writer, args=(self._q_sys, self._f_sys), daemon=False
             )
@@ -138,15 +171,13 @@ class AudioRecorder:
 
         if cfg.outputs.mixed_stereo:
             self._q_mix = queue.Queue(maxsize=100)
-            mix_path = unique_path(cfg.output_dir / cfg.mixed_filename)
-            self._p_mix = Path(mix_path)
-            self._f_mix = sf.SoundFile(
-                mix_path,
-                mode="w",
-                samplerate=cfg.sample_rate,
-                channels=2,
-                subtype="PCM_16",
-            )
+            final = _final_path(cfg.mixed_filename, ext)
+            self._p_mix = final
+            if cfg.file_format == "mp3":
+                self._tmp_mix = unique_path(final.with_suffix(".tmp.wav"))
+                self._f_mix = _open_soundfile(self._tmp_mix, channels=2)
+            else:
+                self._f_mix = _open_soundfile(final, channels=2)
             self._t_mix = threading.Thread(
                 target=self._writer, args=(self._q_mix, self._f_mix), daemon=False
             )
@@ -194,7 +225,13 @@ class AudioRecorder:
             if f is not None:
                 f.close()
 
-        # After files are closed, rename them with end timestamp prefix
+        # If MP3: convert temp WAVs to MP3s
+        if self._cfg is not None and self._cfg.file_format == "mp3":
+            _convert_to_mp3(self._tmp_mic, self._p_mic, self._cfg.mp3_bitrate_kbps)
+            _convert_to_mp3(self._tmp_sys, self._p_sys, self._cfg.mp3_bitrate_kbps)
+            _convert_to_mp3(self._tmp_mix, self._p_mix, self._cfg.mp3_bitrate_kbps)
+
+        # After files are closed/converted, rename with end timestamp prefix
         for p in (self._p_mic, self._p_sys, self._p_mix):
             if p is not None and p.exists():
                 try:
@@ -207,6 +244,7 @@ class AudioRecorder:
         self._q_mic = self._q_sys = self._q_mix = None
         self._t_mic = self._t_sys = self._t_mix = None
         self._p_mic = self._p_sys = self._p_mix = None
+        self._tmp_mic = self._tmp_sys = self._tmp_mix = None
         self._cfg = None
         self._start_time = None
 
@@ -287,3 +325,61 @@ def list_input_devices() -> list[str]:
     """Return names of input-capable devices."""
     devs = sd.query_devices()
     return [d["name"] for d in devs if d.get("max_input_channels", 0) > 0]
+
+
+def _safe_unlink(p: Optional[Path]) -> None:
+    try:
+        if p is not None and p.exists():
+            p.unlink()
+    except Exception:
+        pass
+
+
+def _run_ffmpeg(cmd: list[str]) -> int:
+    import subprocess
+
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return proc.returncode
+    except Exception:
+        return 1
+
+
+def _convert_wav_to_mp3(tmp_wav: Path, out_mp3: Path, bitrate_kbps: int) -> bool:
+    # Use libmp3lame if available
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(tmp_wav),
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        f"{bitrate_kbps}k",
+        str(out_mp3),
+    ]
+    return _run_ffmpeg(cmd) == 0
+
+
+class _MissingTmp(Exception):
+    pass
+
+
+def _require_tmp(p: Optional[Path]) -> Path:
+    if p is None:
+        raise _MissingTmp()
+    return p
+
+
+def _convert_to_mp3(
+    tmp_path: Optional[Path], final_path: Optional[Path], bitrate_kbps: int
+) -> None:
+    if tmp_path is None or final_path is None:
+        return
+    if _convert_wav_to_mp3(tmp_path, final_path, bitrate_kbps):
+        _safe_unlink(tmp_path)
+    else:
+        print(f"FFmpeg conversion failed for {tmp_path}", flush=True)

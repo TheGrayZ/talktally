@@ -126,13 +126,85 @@ class TalkTallyApp(tk.Tk):
         # Output directory chooser
         dir_frame = ttk.Frame(out_frame)
         dir_frame.grid(row=3, column=0, columnspan=3, sticky="we", padx=8, pady=6)
-        ttk.Label(dir_frame, text="Output directory:").pack(side="left")
-        self.var_outdir = tk.StringVar(value=self._settings.output_dir or str(Path.cwd()))
-        self.entry_outdir = ttk.Entry(dir_frame, textvariable=self.var_outdir, width=44)
-        self.entry_outdir.pack(side="left", padx=6)
-        ttk.Button(dir_frame, text="Browse…", command=self._browse_dir).pack(
-            side="left"
+        ttk.Label(dir_frame, text="Output directory:").grid(row=0, column=0, sticky="w")
+        self.var_outdir = tk.StringVar(
+            value=self._settings.output_dir or str(Path.cwd())
         )
+        self.entry_outdir = ttk.Entry(dir_frame, textvariable=self.var_outdir, width=44)
+        self.entry_outdir.grid(row=0, column=1, sticky="we", padx=6)
+        dir_frame.columnconfigure(1, weight=1)
+        ttk.Button(dir_frame, text="Browse…", command=self._browse_dir).grid(
+            row=0, column=2, padx=4
+        )
+
+        # Format & encoding settings next to output path
+        fmt_frame = ttk.Frame(out_frame)
+        fmt_frame.grid(row=4, column=0, columnspan=3, sticky="we", padx=8, pady=4)
+
+        ttk.Label(fmt_frame, text="Format:").grid(row=0, column=0, sticky="e")
+        self.var_format = tk.StringVar(
+            value=self._settings.file_format
+            if hasattr(self._settings, "file_format")
+            else "wav"
+        )
+        self.cb_format = ttk.Combobox(
+            fmt_frame,
+            state="readonly",
+            width=8,
+            values=["wav", "mp3", "flac"],
+            textvariable=self.var_format,
+        )
+        self.cb_format.grid(row=0, column=1, sticky="w", padx=4)
+
+        # WAV settings
+        self.var_wav_sr = tk.IntVar(
+            value=getattr(self._settings, "wav_sample_rate", 48000)
+        )
+        self.var_wav_bd = tk.IntVar(value=getattr(self._settings, "wav_bit_depth", 16))
+        self.wav_sr_cb = ttk.Combobox(
+            fmt_frame,
+            state="readonly",
+            width=8,
+            values=[44100, 48000],
+            textvariable=self.var_wav_sr,
+        )
+        self.wav_bd_cb = ttk.Combobox(
+            fmt_frame,
+            state="readonly",
+            width=6,
+            values=[16, 24],
+            textvariable=self.var_wav_bd,
+        )
+
+        # MP3 settings
+        self.var_mp3_kbps = tk.IntVar(
+            value=getattr(self._settings, "mp3_bitrate_kbps", 192)
+        )
+        self.mp3_kbps_cb = ttk.Combobox(
+            fmt_frame,
+            state="readonly",
+            width=8,
+            values=[96, 128, 160, 192, 256, 320],
+            textvariable=self.var_mp3_kbps,
+        )
+
+        # FLAC settings
+        self.var_flac_level = tk.IntVar(value=getattr(self._settings, "flac_level", 5))
+        self.flac_level_cb = ttk.Combobox(
+            fmt_frame,
+            state="readonly",
+            width=6,
+            values=list(range(0, 9)),
+            textvariable=self.var_flac_level,
+        )
+
+        # Estimated storage per minute
+        self.estimate_var = tk.StringVar(value="")
+        self.estimate_lbl = ttk.Label(fmt_frame, textvariable=self.estimate_var)
+
+        # Initial layout and estimate
+        self._refresh_encoding_controls()
+        self._update_storage_estimate()
 
         # Record button + status
         ctrl = ttk.Frame(self)
@@ -213,6 +285,7 @@ class TalkTallyApp(tk.Tk):
 
             cfg = RecorderConfig(
                 device_name=dev,
+                sample_rate=int(self.var_wav_sr.get()),
                 mic_channels=mic_ch,
                 system_channels=sys_ch,
                 output_dir=outdir,
@@ -224,6 +297,9 @@ class TalkTallyApp(tk.Tk):
                     system=self.var_sys.get(),
                     mixed_stereo=self.var_mix.get(),
                 ),
+                file_format=self.var_format.get(),
+                wav_bit_depth=int(self.var_wav_bd.get()),
+                mp3_bitrate_kbps=int(self.var_mp3_kbps.get()),
             )
             if not (cfg.outputs.mic or cfg.outputs.system or cfg.outputs.mixed_stereo):
                 messagebox.showerror("No outputs", "Enable at least one output.")
@@ -330,22 +406,108 @@ class TalkTallyApp(tk.Tk):
         # Prevent floods during initial setup
         self._saving_suspended = True
         try:
+
             def bind(var, setter):
                 var.trace_add("write", lambda *_: setter())
 
-            bind(self.device_var, lambda: self._save_field("device_name", self.device_var.get()))
-            bind(self.mic_ch_var, lambda: self._save_field("mic_channels", self.mic_ch_var.get()))
-            bind(self.sys_ch_var, lambda: self._save_field("system_channels", self.sys_ch_var.get()))
-            bind(self.var_outdir, lambda: self._save_field("output_dir", self.var_outdir.get()))
-            bind(self.var_mic_file, lambda: self._save_field("mic_filename", self.var_mic_file.get()))
-            bind(self.var_sys_file, lambda: self._save_field("system_filename", self.var_sys_file.get()))
-            bind(self.var_mix_file, lambda: self._save_field("mixed_filename", self.var_mix_file.get()))
-            bind(self.var_mic, lambda: self._save_field("output_mic", self.var_mic.get()))
-            bind(self.var_sys, lambda: self._save_field("output_system", self.var_sys.get()))
-            bind(self.var_mix, lambda: self._save_field("output_mixed", self.var_mix.get()))
-            bind(self.enable_hotkey, lambda: self._save_field("enable_hotkey", self.enable_hotkey.get()))
-            bind(self.hotkey_var, lambda: self._save_field("hotkey", self.hotkey_var.get()))
-            bind(self.var_sounds, lambda: self._save_field("play_sounds", self.var_sounds.get()))
+            bind(
+                self.device_var,
+                lambda: self._save_field("device_name", self.device_var.get()),
+            )
+            bind(
+                self.mic_ch_var,
+                lambda: (
+                    self._save_field("mic_channels", self.mic_ch_var.get()),
+                    self._update_storage_estimate(),
+                ),
+            )
+            bind(
+                self.sys_ch_var,
+                lambda: (
+                    self._save_field("system_channels", self.sys_ch_var.get()),
+                    self._update_storage_estimate(),
+                ),
+            )
+            bind(
+                self.var_outdir,
+                lambda: self._save_field("output_dir", self.var_outdir.get()),
+            )
+            bind(
+                self.var_mic_file,
+                lambda: self._save_field("mic_filename", self.var_mic_file.get()),
+            )
+            bind(
+                self.var_sys_file,
+                lambda: self._save_field("system_filename", self.var_sys_file.get()),
+            )
+            bind(
+                self.var_mix_file,
+                lambda: self._save_field("mixed_filename", self.var_mix_file.get()),
+            )
+            bind(
+                self.var_mic,
+                lambda: (
+                    self._save_field("output_mic", self.var_mic.get()),
+                    self._update_storage_estimate(),
+                ),
+            )
+            bind(
+                self.var_sys,
+                lambda: (
+                    self._save_field("output_system", self.var_sys.get()),
+                    self._update_storage_estimate(),
+                ),
+            )
+            bind(
+                self.var_mix,
+                lambda: (
+                    self._save_field("output_mixed", self.var_mix.get()),
+                    self._update_storage_estimate(),
+                ),
+            )
+            bind(
+                self.enable_hotkey,
+                lambda: self._save_field("enable_hotkey", self.enable_hotkey.get()),
+            )
+            bind(
+                self.hotkey_var,
+                lambda: self._save_field("hotkey", self.hotkey_var.get()),
+            )
+            bind(
+                self.var_sounds,
+                lambda: self._save_field("play_sounds", self.var_sounds.get()),
+            )
+
+            # Encoding bindings
+            bind(self.var_format, self._on_format_change)
+            bind(
+                self.var_wav_sr,
+                lambda: (
+                    self._save_field("wav_sample_rate", int(self.var_wav_sr.get())),
+                    self._update_storage_estimate(),
+                ),
+            )
+            bind(
+                self.var_wav_bd,
+                lambda: (
+                    self._save_field("wav_bit_depth", int(self.var_wav_bd.get())),
+                    self._update_storage_estimate(),
+                ),
+            )
+            bind(
+                self.var_mp3_kbps,
+                lambda: (
+                    self._save_field("mp3_bitrate_kbps", int(self.var_mp3_kbps.get())),
+                    self._update_storage_estimate(),
+                ),
+            )
+            bind(
+                self.var_flac_level,
+                lambda: (
+                    self._save_field("flac_level", int(self.var_flac_level.get())),
+                    self._update_storage_estimate(),
+                ),
+            )
         finally:
             self._saving_suspended = False
 
@@ -370,6 +532,31 @@ class TalkTallyApp(tk.Tk):
         self._settings.output_mic = self.var_mic.get()
         self._settings.output_system = self.var_sys.get()
         self._settings.output_mixed = self.var_mix.get()
+        # Encoding
+        self._settings.file_format = (
+            getattr(self, "var_format").get() if hasattr(self, "var_format") else "wav"
+        )
+        self._settings.wav_sample_rate = (
+            int(getattr(self, "var_wav_sr").get())
+            if hasattr(self, "var_wav_sr")
+            else 48000
+        )
+        self._settings.wav_bit_depth = (
+            int(getattr(self, "var_wav_bd").get())
+            if hasattr(self, "var_wav_bd")
+            else 16
+        )
+        self._settings.mp3_bitrate_kbps = (
+            int(getattr(self, "var_mp3_kbps").get())
+            if hasattr(self, "var_mp3_kbps")
+            else 192
+        )
+        self._settings.flac_level = (
+            int(getattr(self, "var_flac_level").get())
+            if hasattr(self, "var_flac_level")
+            else 5
+        )
+        # Hotkey and alerts
         self._settings.enable_hotkey = self.enable_hotkey.get()
         self._settings.hotkey = self.hotkey_var.get()
         self._settings.play_sounds = self.var_sounds.get()
@@ -381,6 +568,120 @@ class TalkTallyApp(tk.Tk):
         if cur and cur in names:
             self.device_cb.set(cur)
 
+    def _on_format_change(self) -> None:
+        fmt = self.var_format.get()
+        self._save_field("file_format", fmt)
+        # Update filename extensions to match selected format
+        from .common.encoding import format_default_extension, replace_extension
+
+        new_ext = format_default_extension(fmt)
+        self.var_mic_file.set(replace_extension(self.var_mic_file.get(), new_ext))
+        self.var_sys_file.set(replace_extension(self.var_sys_file.get(), new_ext))
+        self.var_mix_file.set(replace_extension(self.var_mix_file.get(), new_ext))
+        self._refresh_encoding_controls()
+        self._update_storage_estimate()
+
+    def _refresh_encoding_controls(self) -> None:
+        # Clear previous placements
+        for w in [
+            self.wav_sr_cb,
+            self.wav_bd_cb,
+            self.mp3_kbps_cb,
+            self.flac_level_cb,
+            self.estimate_lbl,
+        ]:
+            try:
+                w.grid_forget()
+            except Exception:
+                pass
+        # Place controls based on selected format
+        fmt = self.var_format.get()
+        # the combobox is at (0,1); we add settings starting at column 2
+        if fmt == "wav":
+            ttk.Label(self.cb_format.master, text="Sample rate:").grid(
+                row=0, column=2, sticky="e"
+            )
+            self.wav_sr_cb.grid(row=0, column=3, sticky="w", padx=4)
+            ttk.Label(self.cb_format.master, text="Bit depth:").grid(
+                row=0, column=4, sticky="e"
+            )
+            self.wav_bd_cb.grid(row=0, column=5, sticky="w", padx=4)
+        elif fmt == "mp3":
+            ttk.Label(self.cb_format.master, text="Bitrate:").grid(
+                row=0, column=2, sticky="e"
+            )
+            self.mp3_kbps_cb.grid(row=0, column=3, sticky="w", padx=4)
+        elif fmt == "flac":
+            ttk.Label(self.cb_format.master, text="Level:").grid(
+                row=0, column=2, sticky="e"
+            )
+            self.flac_level_cb.grid(row=0, column=3, sticky="w", padx=4)
+        # Storage estimate label at end
+        ttk.Label(self.cb_format.master, text="Estimated per minute:").grid(
+            row=0, column=6, sticky="e", padx=(12, 4)
+        )
+        self.estimate_lbl.grid(row=0, column=7, sticky="w")
+
+    def _update_storage_estimate(self) -> None:
+        from .common.encoding import (
+            wav_bytes_per_minute,
+            mp3_bytes_per_minute,
+            flac_bytes_per_minute,
+            human_readable_bytes,
+        )
+
+        # Determine enabled outputs and channel counts
+        total = 0
+        # mic: writer outputs stereo
+        if self.var_mic.get():
+            if self.var_format.get() == "wav":
+                total += wav_bytes_per_minute(
+                    2, int(self.var_wav_sr.get()), int(self.var_wav_bd.get())
+                )
+            elif self.var_format.get() == "mp3":
+                total += mp3_bytes_per_minute(int(self.var_mp3_kbps.get()))
+            else:
+                total += flac_bytes_per_minute(
+                    2,
+                    int(self.var_wav_sr.get()),
+                    int(self.var_wav_bd.get()),
+                    int(self.var_flac_level.get()),
+                )
+        # system: channel count from mapping
+        if self.var_sys.get():
+            try:
+                chs = len(self._parse_indices(self.sys_ch_var.get()))
+            except Exception:
+                chs = 2
+            if self.var_format.get() == "wav":
+                total += wav_bytes_per_minute(
+                    chs, int(self.var_wav_sr.get()), int(self.var_wav_bd.get())
+                )
+            elif self.var_format.get() == "mp3":
+                total += mp3_bytes_per_minute(int(self.var_mp3_kbps.get()))
+            else:
+                total += flac_bytes_per_minute(
+                    chs,
+                    int(self.var_wav_sr.get()),
+                    int(self.var_wav_bd.get()),
+                    int(self.var_flac_level.get()),
+                )
+        # mixed stereo
+        if self.var_mix.get():
+            if self.var_format.get() == "wav":
+                total += wav_bytes_per_minute(
+                    2, int(self.var_wav_sr.get()), int(self.var_wav_bd.get())
+                )
+            elif self.var_format.get() == "mp3":
+                total += mp3_bytes_per_minute(int(self.var_mp3_kbps.get()))
+            else:
+                total += flac_bytes_per_minute(
+                    2,
+                    int(self.var_wav_sr.get()),
+                    int(self.var_wav_bd.get()),
+                    int(self.var_flac_level.get()),
+                )
+        self.estimate_var.set(human_readable_bytes(total))
 
     # ------- Hotkey -------
     def _toggle_hotkey_listener(self) -> None:

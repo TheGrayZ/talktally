@@ -37,6 +37,7 @@ class TalkTallyApp(tk.Tk):
         self._overlay_job: Optional[str] = None
 
         self._hotkey_listener = None  # type: ignore[assignment]
+        self._dictation: object | None = None
 
         self._build_ui()
         self._create_overlay()
@@ -46,6 +47,8 @@ class TalkTallyApp(tk.Tk):
         self._bind_setting_traces()
         if self.enable_hotkey.get():
             self._start_hotkey_listener()
+        if getattr(self._settings, "dictation_enable", False):
+            self._start_dictation_agent()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
@@ -241,6 +244,52 @@ class TalkTallyApp(tk.Tk):
         ttk.Label(
             extras, text="Indicator overlay shows in top-right while recording"
         ).grid(row=1, column=1, columnspan=2, sticky="w", padx=6)
+
+        # Dictation settings
+        dict_frame = ttk.LabelFrame(self, text="Dictation (push-to-talk)")
+        dict_frame.pack(fill="x", **pad)
+        self.dictation_enable = tk.BooleanVar(
+            value=getattr(self._settings, "dictation_enable", False)
+        )
+        self.dictation_hotkey = tk.StringVar(
+            value=getattr(self._settings, "dictation_hotkey", "right_option")
+        )
+        self.dictation_wispr_cmd = tk.StringVar(
+            value=getattr(self._settings, "dictation_wispr_cmd", "whisper")
+        )
+        self.dictation_wispr_args = tk.StringVar(
+            value=getattr(self._settings, "dictation_wispr_args", "--model tiny")
+        )
+        ttk.Checkbutton(
+            dict_frame,
+            text="Enable dictation",
+            variable=self.dictation_enable,
+            command=self._toggle_dictation_agent,
+        ).grid(row=0, column=0, sticky="w", padx=8, pady=4)
+        ttk.Label(
+            dict_frame, text="Hold key (e.g. right_option, left_option, keycode:61):"
+        ).grid(row=0, column=1, sticky="e")
+        de = ttk.Entry(dict_frame, textvariable=self.dictation_hotkey, width=28)
+        de.grid(row=0, column=2, sticky="w", padx=6)
+        de.bind("<FocusOut>", lambda _e: self._restart_dictation_if_enabled())
+
+        ttk.Label(dict_frame, text="Transcriber command:").grid(
+            row=1, column=1, sticky="e", pady=2
+        )
+        cmd_entry = ttk.Entry(
+            dict_frame, textvariable=self.dictation_wispr_cmd, width=28
+        )
+        cmd_entry.grid(row=1, column=2, sticky="w", padx=6, pady=2)
+        cmd_entry.bind("<FocusOut>", lambda _e: self._restart_dictation_if_enabled())
+
+        ttk.Label(dict_frame, text="Extra args (e.g. --model tiny):").grid(
+            row=2, column=1, sticky="e", pady=2
+        )
+        args_entry = ttk.Entry(
+            dict_frame, textvariable=self.dictation_wispr_args, width=38
+        )
+        args_entry.grid(row=2, column=2, sticky="w", padx=6, pady=2)
+        args_entry.bind("<FocusOut>", lambda _e: self._restart_dictation_if_enabled())
 
     # ------- UI Callbacks -------
     def _refresh_devices(self) -> None:
@@ -477,6 +526,31 @@ class TalkTallyApp(tk.Tk):
                 self.var_sounds,
                 lambda: self._save_field("play_sounds", self.var_sounds.get()),
             )
+            # Dictation bindings
+            bind(
+                self.dictation_enable,
+                lambda: self._save_field(
+                    "dictation_enable", self.dictation_enable.get()
+                ),
+            )
+            bind(
+                self.dictation_hotkey,
+                lambda: self._save_field(
+                    "dictation_hotkey", self.dictation_hotkey.get()
+                ),
+            )
+            bind(
+                self.dictation_wispr_cmd,
+                lambda: self._save_field(
+                    "dictation_wispr_cmd", self.dictation_wispr_cmd.get()
+                ),
+            )
+            bind(
+                self.dictation_wispr_args,
+                lambda: self._save_field(
+                    "dictation_wispr_args", self.dictation_wispr_args.get()
+                ),
+            )
 
             # Encoding bindings
             bind(self.var_format, self._on_format_change)
@@ -560,6 +634,11 @@ class TalkTallyApp(tk.Tk):
         self._settings.enable_hotkey = self.enable_hotkey.get()
         self._settings.hotkey = self.hotkey_var.get()
         self._settings.play_sounds = self.var_sounds.get()
+        # Dictation
+        self._settings.dictation_enable = self.dictation_enable.get()
+        self._settings.dictation_hotkey = self.dictation_hotkey.get()
+        self._settings.dictation_wispr_cmd = self.dictation_wispr_cmd.get()
+        self._settings.dictation_wispr_args = self.dictation_wispr_args.get()
 
     def _apply_device_selection(self) -> None:
         # Ensure device combobox reflects saved value when available
@@ -923,6 +1002,44 @@ class TalkTallyApp(tk.Tk):
         except Exception:
             pass
 
+    # ------- Dictation agent -------
+    def _toggle_dictation_agent(self) -> None:
+        if self.dictation_enable.get():
+            self._start_dictation_agent()
+        else:
+            self._stop_dictation_agent()
+
+    def _restart_dictation_if_enabled(self) -> None:
+        if self.dictation_enable.get():
+            self._stop_dictation_agent()
+            self._start_dictation_agent()
+
+    def _start_dictation_agent(self) -> None:
+        try:
+            # Lazy import to avoid importing mac-specific modules during tests
+            from .dictation import DictationAgent  # local import
+
+            if self._dictation is None:
+                self._dictation = DictationAgent(
+                    self._settings, ui_dispatch=lambda f: self.after(0, f)
+                )
+            else:
+                # type: ignore[attr-defined]
+                self._dictation.restart(self._settings)  # type: ignore[call-arg]
+            # type: ignore[attr-defined]
+            self._dictation.start()  # type: ignore[call-arg]
+        except Exception:
+            # Non-fatal if dictation cannot start (e.g., no permissions)
+            pass
+
+    def _stop_dictation_agent(self) -> None:
+        try:
+            if self._dictation is not None:
+                # type: ignore[attr-defined]
+                self._dictation.stop()  # type: ignore[call-arg]
+        except Exception:
+            pass
+
     # ------- Lifecycle -------
     def _on_close(self) -> None:
         # Persist latest settings (including geometry) before closing
@@ -936,6 +1053,10 @@ class TalkTallyApp(tk.Tk):
         try:
             if self.rec.is_running():
                 self.rec.stop()
+        except Exception:
+            pass
+        try:
+            self._stop_dictation_agent()
         except Exception:
             pass
         self.destroy()

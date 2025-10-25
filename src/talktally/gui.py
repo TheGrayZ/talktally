@@ -739,12 +739,21 @@ class TalkTallyApp(tk.Tk):
 
         # Refresh transcript list
         if hasattr(self, "transcript_tree"):
-            transcripts = sorted(
-                (
-                    p
-                    for p in directory.glob("*.txt")
-                    if p.is_file()
-                ),
+            transcripts_dir = directory / "transcripts"
+            candidates = []
+            if transcripts_dir.exists():
+                candidates.extend(
+                    p for p in transcripts_dir.glob("*.txt") if p.is_file()
+                )
+            if directory.exists():
+                candidates.extend(p for p in directory.glob("*.txt") if p.is_file())
+            seen_paths: set[Path] = set()
+            transcripts = []
+            for p in candidates:
+                if p not in seen_paths:
+                    transcripts.append(p)
+                    seen_paths.add(p)
+            transcripts.sort(
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )

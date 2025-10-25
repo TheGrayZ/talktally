@@ -13,14 +13,25 @@ SUPPORTED_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".aiff"
 
 
 def list_recordings(directory: Path) -> list[Path]:
-    """Return supported audio files in the directory, newest first."""
-    if not directory.exists():
-        return []
-    recordings = [
-        p
-        for p in directory.iterdir()
-        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
-    ]
+    """Return supported audio files newest-first, preferring the 'recordings' subfolder."""
+    directory = Path(directory)
+    search_dirs: list[Path] = []
+    recordings_dir = directory / "recordings"
+    if recordings_dir.exists():
+        search_dirs.append(recordings_dir)
+    if directory.exists():
+        search_dirs.append(directory)
+    seen: set[Path] = set()
+    recordings: list[Path] = []
+    for folder in search_dirs:
+        for p in folder.iterdir():
+            if (
+                p.is_file()
+                and p.suffix.lower() in SUPPORTED_EXTENSIONS
+                and p not in seen
+            ):
+                recordings.append(p)
+                seen.add(p)
     return sorted(recordings, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
@@ -87,11 +98,17 @@ def transcribe_recording(
     text = transcriber.transcribe(audio_path)
     output: Path | None = None
     if write_text:
+        parent_dir = audio_path.parent
+        if parent_dir.name.lower() == "recordings" and parent_dir.parent.exists():
+            transcripts_dir = parent_dir.parent / "transcripts"
+        else:
+            transcripts_dir = parent_dir / "transcripts"
+        transcripts_dir.mkdir(parents=True, exist_ok=True)
         if model:
             token = model_filename_token(model)
-            output = audio_path.with_name(f"{audio_path.stem}__{token}.txt")
+            output = transcripts_dir / f"{audio_path.stem}__{token}.txt"
         else:
-            output = audio_path.with_suffix(".txt")
+            output = transcripts_dir / f"{audio_path.stem}.txt"
         if output.exists():
             if not overwrite:
                 raise FileExistsError(str(output))

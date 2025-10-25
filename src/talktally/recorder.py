@@ -125,8 +125,11 @@ class AudioRecorder:
                 subtype=subtype,
             )
 
+        recordings_dir = cfg.output_dir / "recordings"
+        recordings_dir.mkdir(parents=True, exist_ok=True)
+
         def _final_path(name: str, ext: str) -> Path:
-            return unique_path(cfg.output_dir / replace_extension(name, ext))
+            return unique_path(recordings_dir / replace_extension(name, ext))
 
         # Determine extension by format
         if cfg.file_format == "wav":

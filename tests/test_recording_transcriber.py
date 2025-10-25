@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import os
 import time
 from pathlib import Path
@@ -11,9 +12,12 @@ from talktally.recording_transcriber import (
 
 
 def test_list_recordings_filters_and_sorts(tmp_path: Path) -> None:
-    newer = tmp_path / "b.wav"
-    older = tmp_path / "a.mp3"
-    skipped = tmp_path / "notes.txt"
+    recordings_dir = tmp_path / "recordings"
+    recordings_dir.mkdir()
+
+    newer = recordings_dir / "b.wav"
+    older = recordings_dir / "a.mp3"
+    skipped = recordings_dir / "notes.txt"
 
     older.write_bytes(b"1")
     # Ensure mod time ordering
@@ -29,7 +33,9 @@ def test_list_recordings_filters_and_sorts(tmp_path: Path) -> None:
 
 
 def test_transcribe_recording_writes_text(monkeypatch, tmp_path: Path) -> None:
-    audio = tmp_path / "example.wav"
+    recordings_dir = tmp_path / "recordings"
+    recordings_dir.mkdir()
+    audio = recordings_dir / "example.wav"
     audio.write_bytes(b"binary")
 
     captured = {}
@@ -59,6 +65,7 @@ def test_transcribe_recording_writes_text(monkeypatch, tmp_path: Path) -> None:
     assert result.source == audio
     assert result.transcript == "hello world"
     assert result.output_path is not None
+    assert result.output_path.parent == tmp_path / "transcripts"
     assert result.output_path.name == "example__base.txt"
     assert result.output_path.read_text() == "hello world"
     assert captured["path"] == audio
@@ -67,7 +74,9 @@ def test_transcribe_recording_writes_text(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_transcribe_recording_retains_previous_models(monkeypatch, tmp_path: Path) -> None:
-    audio = tmp_path / "sample.wav"
+    recordings_dir = tmp_path / "recordings"
+    recordings_dir.mkdir()
+    audio = recordings_dir / "sample.wav"
     audio.write_bytes(b"data")
 
     returns = {
@@ -94,6 +103,10 @@ def test_transcribe_recording_retains_previous_models(monkeypatch, tmp_path: Pat
     fourth = transcribe_recording(audio, cmd="cmd", model="base")
 
     assert first.output_path and second.output_path and third.output_path and fourth.output_path
+    assert first.output_path.parent == tmp_path / "transcripts"
+    assert second.output_path.parent == tmp_path / "transcripts"
+    assert third.output_path.parent == tmp_path / "transcripts"
+    assert fourth.output_path.parent == tmp_path / "transcripts"
     assert len(
         {first.output_path, second.output_path, third.output_path, fourth.output_path}
     ) == 4

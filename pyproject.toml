@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "talktally"
+version = "0.1.0"
+description = "TalkTally recorder: capture mic, system audio, and mixed output on macOS"
+authors = [{ name = "TalkTally" }]
+readme = "AGENTS.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "sounddevice>=0.4.6",
+  "soundfile>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7",
+  "ruff>=0.5",
+]
+
+[project.scripts]
+talktally-gui = "talktally.gui:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["talktally*"]

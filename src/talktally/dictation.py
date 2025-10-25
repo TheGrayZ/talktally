@@ -15,8 +15,6 @@ import subprocess
 import tempfile
 import threading
 import time
-import shlex
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Callable
@@ -26,6 +24,7 @@ import sounddevice as sd
 import soundfile as sf
 
 from .common.settings import Settings
+from .common.transcription import LocalTranscriber
 
 
 def _dbg(msg: str) -> None:
@@ -255,9 +254,12 @@ class DictationAgent:
             self._transcribing.set()
             try:
                 _dbg(f"transcribe begin: cmd={self._cfg.wispr_cmd}")
-                text = _LocalWispr(self._cfg.wispr_cmd, self._cfg.wispr_args).transcribe(
-                    wav_path
+                transcriber = LocalTranscriber(
+                    cmd=self._cfg.wispr_cmd,
+                    extra_args=self._cfg.wispr_args,
+                    debug=_dbg,
                 )
+                text = transcriber.transcribe(wav_path)
                 _dbg(f"transcribe done len={len(text) if text else 0}")
                 if text:
                     _dbg(f"pasting first20='{text[:20]}'…")
@@ -398,174 +400,6 @@ class _MicCapturer:
             if self._f is not None:
                 # clip and write as float -> SoundFile handles conversion
                 self._f.write(np.clip(block, -1.0, 1.0))
-
-
-class _LocalWispr:
-    """Call a local Wispr/Whisper executable to transcribe a WAV file.
-
-    Behaviors:
-    - If cmd basename is 'whisper' (OpenAI whisper CLI): run it with --output_dir to temp and
-      read the generated .txt, then delete artifacts.
-    - Otherwise: run `[cmd, wav_path]` and read transcript from stdout.
-    """
-
-    def __init__(self, cmd: str = "whisper", extra_args: str = "") -> None:
-        # Choose an available command: prefer provided; else fall back to 'whisper' when available
-        import shutil
-
-        parts = shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
-        if not parts:
-            parts = ["whisper"]
-        chosen = parts
-        if shutil.which(chosen[0]) is None:
-            alt = shutil.which("whisper")
-            if alt is not None:
-                chosen = [alt]
-        self._cmd = chosen
-        self._extra_args = shlex.split(extra_args) if extra_args else []
-        _dbg(
-            "transcriber command = "
-            + " ".join(self._cmd)
-            + (f" extra={' '.join(self._extra_args)}" if self._extra_args else "")
-        )
-
-    def transcribe(self, wav_path: str) -> str:
-        cmd_name = Path(self._cmd[0]).name.lower()
-        if cmd_name == "whisper":
-            # Use OpenAI Whisper CLI, write txt to a temp dir and read it
-            tmpdir = Path(tempfile.mkdtemp(prefix="dictation_whisper_"))
-            txt_path = tmpdir / (Path(wav_path).stem + ".txt")
-            _dbg(f"whisper tmpdir={tmpdir} expect_txt={txt_path.name}")
-            try:
-                cmd = list(self._cmd) + [wav_path]
-                if self._extra_args:
-                    cmd.extend(self._extra_args)
-                cmd.extend(
-                    [
-                        "--output_dir",
-                        str(tmpdir),
-                        "--output_format",
-                        "txt",
-                        "--verbose",
-                        "False",
-                    ]
-                )
-                proc = subprocess.run(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=False,
-                )
-            except FileNotFoundError as e:  # noqa: BLE001
-                raise RuntimeError(
-                    f"Transcriber command '{' '.join(self._cmd)}' not found. Set Settings.dictation_wispr_cmd."
-                ) from e
-            _dbg(f"whisper rc={proc.returncode}")
-            if proc.returncode != 0:
-                err = proc.stderr.decode("utf-8", errors="ignore").strip()
-                out = proc.stdout.decode("utf-8", errors="ignore").strip()
-                _dbg(f"whisper stderr: {err}")
-                raise RuntimeError(f"whisper failed ({proc.returncode}): {err or out}")
-            # Read produced txt
-            try:
-                files = [p.name for p in tmpdir.glob("*")]
-                _dbg(f"whisper outputs: {files}")
-                if not txt_path.exists():
-                    # Fallback: pick first txt in dir
-                    candidates = list(tmpdir.glob("*.txt"))
-                    if candidates:
-                        txt_path = candidates[0]
-                text = (
-                    txt_path.read_text(encoding="utf-8", errors="ignore").strip()
-                    if txt_path.exists()
-                    else ""
-                )
-                if not text:
-                    json_path = tmpdir / (Path(wav_path).stem + ".json")
-                    if json_path.exists():
-                        try:
-                            payload = json.loads(
-                                json_path.read_text(encoding="utf-8", errors="ignore")
-                            )
-                            segments = payload.get("segments") or []
-                            text = " ".join(
-                                seg.get("text", "") for seg in segments if seg
-                            ).strip()
-                            _dbg(
-                                "whisper json fallback used"
-                                if text
-                                else "whisper json fallback empty"
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            _dbg(f"whisper json parse failed: {exc}")
-                _dbg(
-                    f"whisper read {len(text)} chars from {txt_path.name if txt_path.exists() else 'N/A'}"
-                )
-            finally:
-                # Cleanup artifacts
-                try:
-                    if txt_path.exists():
-                        txt_path.unlink()
-                except Exception:
-                    pass
-                try:
-                    # Remove any other small artifacts (vtt/srt) if generated, then dir
-                    for p in tmpdir.glob("*"):
-                        try:
-                            p.unlink()
-                        except Exception:
-                            pass
-                    tmpdir.rmdir()
-                except Exception:
-                    pass
-            # Normalize whitespace to single line for paste
-            return text.replace("\r", " ").replace("\n", " ").strip()
-
-        # Fallback: stdout-based tool (custom wispr)
-        try:
-            cmd = list(self._cmd) + [wav_path]
-            if self._extra_args:
-                cmd.extend(self._extra_args)
-            proc = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-        except FileNotFoundError:
-            # Last-chance fallback to 'whisper' if available
-            try:
-                import shutil
-
-                if shutil.which("whisper") is not None:
-                    proc = subprocess.run(
-                        [
-                            "whisper",
-                            wav_path,
-                            *self._extra_args,
-                            "--output_dir",
-                            tempfile.gettempdir(),
-                            "--output_format",
-                            "txt",
-                            "--verbose",
-                            "False",
-                        ],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        check=False,
-                    )
-                else:
-                    raise
-            except Exception as e2:  # noqa: BLE001
-                raise RuntimeError(
-                    f"Transcriber command '{' '.join(self._cmd)}' not found and no fallback available. Set Settings.dictation_wispr_cmd."
-                ) from e2
-        out = proc.stdout.decode("utf-8", errors="ignore").strip()
-        if proc.returncode != 0:
-            err = proc.stderr.decode("utf-8", errors="ignore").strip()
-            _dbg(f"stdout-tool stderr: {err}")
-            raise RuntimeError(f"Transcriber failed ({proc.returncode}): {err or out}")
-        return out.replace("\r", " ").replace("\n", " ").strip()
 
 
 class _MicHud:

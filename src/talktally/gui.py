@@ -254,6 +254,12 @@ class TalkTallyApp(tk.Tk):
         self.dictation_hotkey = tk.StringVar(
             value=getattr(self._settings, "dictation_hotkey", "right_option")
         )
+        self.dictation_wispr_cmd = tk.StringVar(
+            value=getattr(self._settings, "dictation_wispr_cmd", "whisper")
+        )
+        self.dictation_wispr_args = tk.StringVar(
+            value=getattr(self._settings, "dictation_wispr_args", "--model tiny")
+        )
         ttk.Checkbutton(
             dict_frame,
             text="Enable dictation",
@@ -266,6 +272,24 @@ class TalkTallyApp(tk.Tk):
         de = ttk.Entry(dict_frame, textvariable=self.dictation_hotkey, width=28)
         de.grid(row=0, column=2, sticky="w", padx=6)
         de.bind("<FocusOut>", lambda _e: self._restart_dictation_if_enabled())
+
+        ttk.Label(dict_frame, text="Transcriber command:").grid(
+            row=1, column=1, sticky="e", pady=2
+        )
+        cmd_entry = ttk.Entry(
+            dict_frame, textvariable=self.dictation_wispr_cmd, width=28
+        )
+        cmd_entry.grid(row=1, column=2, sticky="w", padx=6, pady=2)
+        cmd_entry.bind("<FocusOut>", lambda _e: self._restart_dictation_if_enabled())
+
+        ttk.Label(dict_frame, text="Extra args (e.g. --model tiny):").grid(
+            row=2, column=1, sticky="e", pady=2
+        )
+        args_entry = ttk.Entry(
+            dict_frame, textvariable=self.dictation_wispr_args, width=38
+        )
+        args_entry.grid(row=2, column=2, sticky="w", padx=6, pady=2)
+        args_entry.bind("<FocusOut>", lambda _e: self._restart_dictation_if_enabled())
 
     # ------- UI Callbacks -------
     def _refresh_devices(self) -> None:
@@ -515,6 +539,18 @@ class TalkTallyApp(tk.Tk):
                     "dictation_hotkey", self.dictation_hotkey.get()
                 ),
             )
+            bind(
+                self.dictation_wispr_cmd,
+                lambda: self._save_field(
+                    "dictation_wispr_cmd", self.dictation_wispr_cmd.get()
+                ),
+            )
+            bind(
+                self.dictation_wispr_args,
+                lambda: self._save_field(
+                    "dictation_wispr_args", self.dictation_wispr_args.get()
+                ),
+            )
 
             # Encoding bindings
             bind(self.var_format, self._on_format_change)
@@ -601,6 +637,8 @@ class TalkTallyApp(tk.Tk):
         # Dictation
         self._settings.dictation_enable = self.dictation_enable.get()
         self._settings.dictation_hotkey = self.dictation_hotkey.get()
+        self._settings.dictation_wispr_cmd = self.dictation_wispr_cmd.get()
+        self._settings.dictation_wispr_args = self.dictation_wispr_args.get()
 
     def _apply_device_selection(self) -> None:
         # Ensure device combobox reflects saved value when available

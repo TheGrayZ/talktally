@@ -15,6 +15,8 @@ import subprocess
 import tempfile
 import threading
 import time
+import shlex
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Callable
@@ -32,10 +34,26 @@ def _dbg(msg: str) -> None:
         print(f"[dictation {ts}] {msg}", flush=True)
 
 
+_ACCESSIBILITY_WARNED = False
+
+
+def _warn_accessibility_permissions() -> None:
+    global _ACCESSIBILITY_WARNED
+    if _ACCESSIBILITY_WARNED:
+        return
+    _ACCESSIBILITY_WARNED = True
+    msg = (
+        "Dictation: macOS blocked simulated keystrokes. Enable Accessibility access for "
+        "TalkTally (or the Python interpreter) under System Settings ▸ Privacy & Security ▸ Accessibility."
+    )
+    print(msg, flush=True)
+
+
 @dataclass
 class DictationConfig:
     hotkey_token: str
     wispr_cmd: str = "wispr"
+    wispr_args: str = ""
     sample_rate: int = 16_000
 
 
@@ -51,6 +69,7 @@ class DictationAgent:
         self._cfg = DictationConfig(
             hotkey_token=settings.dictation_hotkey,
             wispr_cmd=settings.dictation_wispr_cmd,
+            wispr_args=getattr(settings, "dictation_wispr_args", "--model tiny"),
             sample_rate=settings.dictation_sample_rate,
         )
         self._listener: Optional[object] = None
@@ -236,7 +255,9 @@ class DictationAgent:
             self._transcribing.set()
             try:
                 _dbg(f"transcribe begin: cmd={self._cfg.wispr_cmd}")
-                text = _LocalWispr(self._cfg.wispr_cmd).transcribe(wav_path)
+                text = _LocalWispr(self._cfg.wispr_cmd, self._cfg.wispr_args).transcribe(
+                    wav_path
+                )
                 _dbg(f"transcribe done len={len(text) if text else 0}")
                 if text:
                     _dbg(f"pasting first20='{text[:20]}'…")
@@ -388,44 +409,56 @@ class _LocalWispr:
     - Otherwise: run `[cmd, wav_path]` and read transcript from stdout.
     """
 
-    def __init__(self, cmd: str = "whisper") -> None:
+    def __init__(self, cmd: str = "whisper", extra_args: str = "") -> None:
         # Choose an available command: prefer provided; else fall back to 'whisper' when available
         import shutil
 
-        chosen = cmd
-        if shutil.which(chosen) is None:
-            alt = "whisper"
-            if shutil.which(alt) is not None:
-                chosen = alt
+        parts = shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
+        if not parts:
+            parts = ["whisper"]
+        chosen = parts
+        if shutil.which(chosen[0]) is None:
+            alt = shutil.which("whisper")
+            if alt is not None:
+                chosen = [alt]
         self._cmd = chosen
-        _dbg(f"transcriber command = {self._cmd}")
+        self._extra_args = shlex.split(extra_args) if extra_args else []
+        _dbg(
+            "transcriber command = "
+            + " ".join(self._cmd)
+            + (f" extra={' '.join(self._extra_args)}" if self._extra_args else "")
+        )
 
     def transcribe(self, wav_path: str) -> str:
-        cmd_name = Path(self._cmd).name.lower()
+        cmd_name = Path(self._cmd[0]).name.lower()
         if cmd_name == "whisper":
             # Use OpenAI Whisper CLI, write txt to a temp dir and read it
             tmpdir = Path(tempfile.mkdtemp(prefix="dictation_whisper_"))
             txt_path = tmpdir / (Path(wav_path).stem + ".txt")
             _dbg(f"whisper tmpdir={tmpdir} expect_txt={txt_path.name}")
             try:
-                proc = subprocess.run(
+                cmd = list(self._cmd) + [wav_path]
+                if self._extra_args:
+                    cmd.extend(self._extra_args)
+                cmd.extend(
                     [
-                        self._cmd,
-                        wav_path,
                         "--output_dir",
                         str(tmpdir),
                         "--output_format",
                         "txt",
                         "--verbose",
                         "False",
-                    ],
+                    ]
+                )
+                proc = subprocess.run(
+                    cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     check=False,
                 )
             except FileNotFoundError as e:  # noqa: BLE001
                 raise RuntimeError(
-                    f"Transcriber command '{self._cmd}' not found. Set Settings.dictation_wispr_cmd."
+                    f"Transcriber command '{' '.join(self._cmd)}' not found. Set Settings.dictation_wispr_cmd."
                 ) from e
             _dbg(f"whisper rc={proc.returncode}")
             if proc.returncode != 0:
@@ -447,6 +480,24 @@ class _LocalWispr:
                     if txt_path.exists()
                     else ""
                 )
+                if not text:
+                    json_path = tmpdir / (Path(wav_path).stem + ".json")
+                    if json_path.exists():
+                        try:
+                            payload = json.loads(
+                                json_path.read_text(encoding="utf-8", errors="ignore")
+                            )
+                            segments = payload.get("segments") or []
+                            text = " ".join(
+                                seg.get("text", "") for seg in segments if seg
+                            ).strip()
+                            _dbg(
+                                "whisper json fallback used"
+                                if text
+                                else "whisper json fallback empty"
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            _dbg(f"whisper json parse failed: {exc}")
                 _dbg(
                     f"whisper read {len(text)} chars from {txt_path.name if txt_path.exists() else 'N/A'}"
                 )
@@ -472,8 +523,11 @@ class _LocalWispr:
 
         # Fallback: stdout-based tool (custom wispr)
         try:
+            cmd = list(self._cmd) + [wav_path]
+            if self._extra_args:
+                cmd.extend(self._extra_args)
             proc = subprocess.run(
-                [self._cmd, wav_path],
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
@@ -488,6 +542,7 @@ class _LocalWispr:
                         [
                             "whisper",
                             wav_path,
+                            *self._extra_args,
                             "--output_dir",
                             tempfile.gettempdir(),
                             "--output_format",
@@ -503,7 +558,7 @@ class _LocalWispr:
                     raise
             except Exception as e2:  # noqa: BLE001
                 raise RuntimeError(
-                    f"Transcriber command '{self._cmd}' not found and no fallback available. Set Settings.dictation_wispr_cmd."
+                    f"Transcriber command '{' '.join(self._cmd)}' not found and no fallback available. Set Settings.dictation_wispr_cmd."
                 ) from e2
         out = proc.stdout.decode("utf-8", errors="ignore").strip()
         if proc.returncode != 0:
@@ -635,26 +690,95 @@ def _paste_text(s: str) -> None:
         _paste_text_applescript(s)
         return
 
-    # Set pasteboard
+    def _send_cmd_v_system_events() -> bool:
+        osa = (
+            'tell application "System Events"\n'
+            "  key code 9 using {command down}\n"
+            "end tell"
+        )
+        try:
+            proc = subprocess.run(
+                ["osascript", "-l", "AppleScript", "-e", osa],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if proc.returncode != 0:
+                err = proc.stderr.decode("utf-8", errors="ignore").strip()
+                _dbg(f"System Events paste failed rc={proc.returncode}: {err}")
+                if "not berechtigt" in err.lower() or "not authorized" in err.lower():
+                    _warn_accessibility_permissions()
+                return False
+            _dbg("System Events paste keystroke sent")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            _dbg(f"System Events paste error: {exc}")
+            return False
+
+    pasteboard_type = getattr(AppKit, "NSPasteboardTypeString", "public.utf8-plain-text")
+
+    # If accessibility permissions are missing, CGEvent posts are ignored. Fall back immediately.
     try:
+        if hasattr(Quartz, "AXIsProcessTrusted") and not Quartz.AXIsProcessTrusted():
+            _dbg("accessibility permission missing; using AppleScript fallback")
+            _paste_text_applescript(s)
+            return
+    except Exception:
+        pass
+
+    def _perform_paste() -> None:
         pb = AppKit.NSPasteboard.generalPasteboard()
         pb.clearContents()
-        NSStringPboardType = "public.utf8-plain-text"
-        pb.setString_forType_(s, NSStringPboardType)
-    except Exception as e:
-        _dbg(f"paste: NSPasteboard error: {e}, falling back to AppleScript")
+        pb.declareTypes_owner_([pasteboard_type], None)
+        if not pb.setString_forType_(s, pasteboard_type):
+            raise RuntimeError("Failed to populate NSPasteboard with transcript text.")
+
+        # Give the pasteboard a moment to propagate the new owner before pasting.
+        time.sleep(0.05)
+
+        if _paste_text_accessibility(s):
+            return
+
+        if not _send_cmd_v_system_events():
+            raise RuntimeError("System Events keystroke failed")
+
+    try:
+        # Ensure pasteboard interaction runs on the main thread when AppKit is available
+        if hasattr(AppKit, "NSThread") and not AppKit.NSThread.isMainThread():
+            done = threading.Event()
+            err: list[Exception] = []
+            executed = {"value": False}
+
+            def _runner() -> None:
+                if executed["value"]:
+                    done.set()
+                    return
+                executed["value"] = True
+                try:
+                    _perform_paste()
+                except Exception as exc:  # noqa: BLE001
+                    err.append(exc)
+                finally:
+                    done.set()
+
+            try:
+                from PyObjCTools.AppHelper import callAfter  # type: ignore
+
+                callAfter(_runner)
+                if not done.wait(timeout=2.0):
+                    _dbg("paste: main-thread dispatch timed out; running inline")
+                    executed["value"] = True
+                    _perform_paste()
+                    done.set()
+            except Exception:
+                _perform_paste()
+            if err:
+                raise err[0]
+        else:
+            _perform_paste()
+    except Exception as e:  # noqa: BLE001
+        _dbg(f"paste: AppKit/Quartz path failed ({e}); falling back to AppleScript")
         _paste_text_applescript(s)
-        return
-
-    # Send Cmd+V
-    def key_event(down: bool):
-        ev = Quartz.CGEventCreateKeyboardEvent(None, 9, down)  # 'v' keycode = 9
-        Quartz.CGEventSetFlags(ev, Quartz.kCGEventFlagMaskCommand)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
-
-    key_event(True)
-    key_event(False)
-    _dbg("paste key sent")
 
 
 def _paste_text_applescript(s: str) -> None:
@@ -665,9 +789,126 @@ def _paste_text_applescript(s: str) -> None:
         proc1.stdin.write(s.encode("utf-8"))  # type: ignore[union-attr]
         proc1.stdin.close()  # type: ignore[union-attr]
         proc1.wait(timeout=1.0)
-        # Trigger Cmd+V via osascript
-        osa = 'tell application "System Events" to keystroke "v" using command down'
-        subprocess.run(["osascript", "-e", osa], check=False)
-        _dbg("AppleScript paste sent")
+        # Trigger Cmd+V via osascript, preferring key code for layout independence
+        osa = (
+            'tell application "System Events"\n'
+            "  key code 9 using {command down}\n"
+            "end tell"
+        )
+        proc2 = subprocess.run(
+            ["osascript", "-l", "AppleScript", "-e", osa],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if proc2.returncode != 0:
+            err = proc2.stderr.decode("utf-8", errors="ignore").strip()
+            _dbg(f"AppleScript paste keystroke failed rc={proc2.returncode}: {err}")
+        else:
+            _dbg("AppleScript paste sent")
     except Exception as e:
         _dbg(f"AppleScript paste error: {e}")
+
+
+def _paste_text_accessibility(s: str) -> bool:
+    try:
+        import Quartz  # type: ignore
+    except Exception:
+        return False
+
+    try:
+        trusted = True
+        if hasattr(Quartz, "AXIsProcessTrustedWithOptions"):
+            trusted = Quartz.AXIsProcessTrustedWithOptions(
+                {Quartz.kAXTrustedCheckOptionPrompt: True}
+            )
+        elif hasattr(Quartz, "AXIsProcessTrusted"):
+            trusted = Quartz.AXIsProcessTrusted()
+        if not trusted:
+            _warn_accessibility_permissions()
+    except Exception:
+        pass
+
+    kAXErrorSuccess = getattr(Quartz, "kAXErrorSuccess", 0)
+    system = Quartz.AXUIElementCreateSystemWide()
+    try:
+        err, focused = Quartz.AXUIElementCopyAttributeValue(
+            system, Quartz.kAXFocusedUIElementAttribute
+        )
+    except Exception as exc:  # noqa: BLE001
+        _dbg(f"AX paste: unable to obtain focused element: {exc}")
+        return False
+    if err != kAXErrorSuccess or focused is None:
+        _dbg(f"AX paste: focused element unavailable (err={err})")
+        return False
+
+    try:
+        err, settable = Quartz.AXUIElementIsAttributeSettable(
+            focused, Quartz.kAXValueAttribute
+        )
+    except Exception:
+        err = kAXErrorSuccess
+        settable = True
+    if err == kAXErrorSuccess and not settable:
+        _dbg("AX paste: focused element is read-only")
+        return False
+
+    existing = ""
+    try:
+        err, current = Quartz.AXUIElementCopyAttributeValue(
+            focused, Quartz.kAXValueAttribute
+        )
+        if err == kAXErrorSuccess and isinstance(current, str):
+            existing = current
+        elif err == kAXErrorSuccess and current is not None:
+            existing = str(current)
+    except Exception as exc:  # noqa: BLE001
+        _dbg(f"AX paste: unable to read current value ({exc})")
+        err = -1
+
+    start = len(existing)
+    length = 0
+    try:
+        err, range_val = Quartz.AXUIElementCopyAttributeValue(
+            focused, Quartz.kAXSelectedTextRangeAttribute
+        )
+        if err == kAXErrorSuccess and range_val is not None:
+            ok, rng = Quartz.AXValueGetValue(
+                range_val, Quartz.kAXValueCFRangeType
+            )
+            if ok and isinstance(rng, tuple) and len(rng) == 2:
+                start, length = int(rng[0]), int(rng[1])
+    except Exception:
+        pass
+
+    try:
+        before = existing[:start]
+        after = existing[start + length :]
+    except Exception:
+        before = existing
+        after = ""
+    new_value = before + s + after
+
+    err = Quartz.AXUIElementSetAttributeValue(
+        focused, Quartz.kAXValueAttribute, new_value
+    )
+    if err != kAXErrorSuccess:
+        if hasattr(Quartz, "kAXErrorNotAuthorized") and err == Quartz.kAXErrorNotAuthorized:
+            _warn_accessibility_permissions()
+        _dbg(f"AX paste: failed to set value (err={err})")
+        return False
+
+    try:
+        new_loc = start + len(s)
+        new_range = Quartz.AXValueCreate(
+            Quartz.kAXValueCFRangeType, (new_loc, 0)
+        )
+        if new_range is not None:
+            Quartz.AXUIElementSetAttributeValue(
+                focused, Quartz.kAXSelectedTextRangeAttribute, new_range
+            )
+    except Exception:
+        pass
+
+    _dbg("AX paste succeeded")
+    return True

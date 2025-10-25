@@ -9,8 +9,8 @@ Features:
 
 from __future__ import annotations
 
-import json
 import os
+import re
 import sys
 import time
 import threading
@@ -27,6 +27,7 @@ from .recording_transcriber import (
     list_recordings,
     transcribe_recording,
     RecordingTranscriptionResult,
+    model_filename_token,
 )
 
 WHISPER_MODELS = [
@@ -275,31 +276,6 @@ class TalkTallyApp(tk.Tk):
         self.status_var = tk.StringVar(value="Idle")
         ttk.Label(ctrl, textvariable=self.status_var).pack(side="left", padx=12)
 
-        # Model settings shared by dictation & transcription
-        current_model = getattr(self._settings, "transcriber_model", "tiny") or "tiny"
-        self.model_var = tk.StringVar(value=current_model)
-        model_choices = list(WHISPER_MODELS)
-        if current_model not in model_choices:
-            model_choices.append(current_model)
-        model_frame = ttk.LabelFrame(root, text="Model Settings")
-        model_frame.pack(fill="x", **pad)
-        model_frame.columnconfigure(1, weight=1)
-        ttk.Label(model_frame, text="Whisper model:").grid(
-            row=0, column=0, sticky="e", padx=8, pady=6
-        )
-        self.model_combo = ttk.Combobox(
-            model_frame,
-            state="readonly",
-            values=model_choices,
-            textvariable=self.model_var,
-            width=16,
-        )
-        self.model_combo.grid(row=0, column=1, sticky="w", padx=6, pady=6)
-        ttk.Label(
-            model_frame,
-            text="Applies to push-to-talk dictation and batch transcription.",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
-
         # Hotkey & dictation settings
         self.enable_hotkey = tk.BooleanVar(value=self._settings.enable_hotkey)
         self.hotkey_var = tk.StringVar(value=self._settings.hotkey)
@@ -313,6 +289,26 @@ class TalkTallyApp(tk.Tk):
         self.dictation_wispr_cmd = tk.StringVar(
             value=getattr(self._settings, "dictation_wispr_cmd", "whisper")
         )
+        dictation_model = (
+            getattr(self._settings, "dictation_model", None)
+            or getattr(self._settings, "transcriber_model", "tiny")
+            or "tiny"
+        )
+        transcription_model = (
+            getattr(self._settings, "transcriber_model", "tiny") or "tiny"
+        )
+        model_choices = list(WHISPER_MODELS)
+        for value in (dictation_model, transcription_model):
+            if value and value not in model_choices:
+                model_choices.append(value)
+        self.dictation_model_var = tk.StringVar(value=dictation_model)
+        self.transcription_model_var = tk.StringVar(value=transcription_model)
+        self._model_choices = tuple(model_choices)
+        self._model_token_map: dict[str, str] = {}
+        for default_model in WHISPER_MODELS:
+            self._register_model_token(default_model)
+        self._register_model_token(dictation_model)
+        self._register_model_token(transcription_model)
 
         hotkey_frame = ttk.LabelFrame(root, text="Hotkey & Dictation")
         hotkey_frame.pack(fill="x", **pad)
@@ -345,6 +341,17 @@ class TalkTallyApp(tk.Tk):
         )
         dict_hotkey_entry.grid(row=1, column=2, sticky="w", padx=6, pady=4)
         dict_hotkey_entry.bind("<FocusOut>", lambda _e: self._restart_dictation_if_enabled())
+        ttk.Label(hotkey_frame, text="Model:").grid(
+            row=1, column=3, sticky="e", padx=(12, 4), pady=4
+        )
+        self.dictation_model_combo = ttk.Combobox(
+            hotkey_frame,
+            state="readonly",
+            values=self._model_choices,
+            textvariable=self.dictation_model_var,
+            width=14,
+        )
+        self.dictation_model_combo.grid(row=1, column=4, sticky="w", padx=6, pady=4)
 
         ttk.Label(hotkey_frame, text="Transcriber command:").grid(
             row=2, column=1, sticky="e", pady=4
@@ -521,7 +528,6 @@ class TalkTallyApp(tk.Tk):
         )
         self.transcript_tree.bind("<Double-1>", lambda _e: self._open_transcript())
         self._transcript_index: dict[str, Path] = {}
-        self._transcript_meta: dict[Path, dict[str, object]] = {}
         self._transcript_rows: dict[Path, str] = {}
         self.transcript_model_var = tk.StringVar(value="Model: —")
         ttk.Label(
@@ -540,6 +546,15 @@ class TalkTallyApp(tk.Tk):
             actions, text="Transcribe", command=self._start_transcription
         )
         self.btn_transcribe.pack(side="left")
+        ttk.Label(actions, text="Model:").pack(side="left", padx=(12, 4))
+        self.transcription_model_combo = ttk.Combobox(
+            actions,
+            state="readonly",
+            values=self._model_choices,
+            textvariable=self.transcription_model_var,
+            width=14,
+        )
+        self.transcription_model_combo.pack(side="left", padx=(0, 6))
         self.btn_open_transcript = ttk.Button(
             actions,
             text="Open Transcript",
@@ -748,18 +763,10 @@ class TalkTallyApp(tk.Tk):
                 self._transcript_rows.clear()
             else:
                 self._transcript_rows = {}
-            self._transcript_meta.clear()
 
             for path in transcripts:
-                meta = self._load_transcript_meta(path)
-                self._transcript_meta[path] = meta
-                model_value = meta.get("model")
-                if isinstance(model_value, str):
-                    model_text = model_value or "—"
-                elif model_value is None:
-                    model_text = "—"
-                else:
-                    model_text = str(model_value)
+                model_guess = self._infer_transcript_model(path)
+                model_text = model_guess if model_guess else "—"
                 try:
                     modified = self._format_mtime(path.stat().st_mtime)
                 except Exception:
@@ -785,6 +792,54 @@ class TalkTallyApp(tk.Tk):
                 self._clear_transcript_preview()
 
         self._update_transcription_buttons()
+
+    def _register_model_token(self, model: str | None) -> None:
+        if not model:
+            return
+        token = model_filename_token(model)
+        if token:
+            self._model_token_map[token] = model
+
+    @staticmethod
+    def _strip_transcript_run_suffix(token: str) -> str:
+        return re.sub(r"\s*\(\d+\)$", "", token).strip()
+
+    def _infer_transcript_model(self, path: Path) -> str | None:
+        stem = path.stem
+        if "__" not in stem:
+            return None
+        token = stem.split("__", 1)[1]
+        token = self._strip_transcript_run_suffix(token).strip("_").lower()
+        if not token:
+            return None
+
+        # Direct match against known tokens
+        model = self._model_token_map.get(token)
+        if model:
+            return model
+
+        # Legacy transcripts replaced punctuation with underscores; try common reversions
+        dot_variant = token.replace("_", ".")
+        model = self._model_token_map.get(dot_variant)
+        if model:
+            return model
+        dash_variant = token.replace("_", "-")
+        model = self._model_token_map.get(dash_variant)
+        if model:
+            return model
+
+        # Register guesses when they correspond to known Whisper models
+        if dot_variant in WHISPER_MODELS:
+            self._model_token_map[token] = dot_variant
+            self._register_model_token(dot_variant)
+            return dot_variant
+        if dash_variant in WHISPER_MODELS:
+            self._model_token_map[token] = dash_variant
+            self._register_model_token(dash_variant)
+            return dash_variant
+
+        # Fallback to a human-friendly display
+        return dot_variant
 
     def _on_transcription_select(self) -> None:
         path = self._get_selected_recording()
@@ -841,33 +896,18 @@ class TalkTallyApp(tk.Tk):
         except Exception:
             text = ""
         self._show_transcription_text(text)
-        meta = self._transcript_meta.get(path)
-        if meta is None:
-            meta = self._load_transcript_meta(path)
-            self._transcript_meta[path] = meta
-        model_value = meta.get("model")
-        if isinstance(model_value, str):
-            model = model_value or "—"
-        elif model_value is None:
-            model = "—"
-        else:
-            model = str(model_value)
-        self.transcript_model_var.set(f"Model: {model}")
+        model = self._infer_transcript_model(path)
+        if not model and self._last_transcript_path == path:
+            model = self._last_transcript_model
+        display = model if model else "—"
+        self.transcript_model_var.set(f"Model: {display}")
         self._last_transcript_path = path
-        self._last_transcript_model = model if model != "—" else None
+        self._last_transcript_model = model
         self._set_transcription_status(
             f"Showing transcript {path.name}.", preserve_when_running=True
         )
         self._update_transcription_buttons()
 
-    def _load_transcript_meta(self, path: Path) -> dict[str, object]:
-        meta_path = path.with_suffix(path.suffix + ".meta.json")
-        try:
-            data = json.loads(meta_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return {str(k): v for k, v in data.items() if isinstance(k, str)}
-        except Exception:
-            pass
         return {}
 
     def _clear_transcript_preview(self) -> None:
@@ -901,7 +941,7 @@ class TalkTallyApp(tk.Tk):
             result = transcribe_recording(
                 audio_path,
                 cmd=self.dictation_wispr_cmd.get() or "whisper",
-                model=self.model_var.get() or None,
+                model=self.transcription_model_var.get() or None,
                 debug=_dbg,
             )
         except Exception as exc:  # noqa: BLE001
@@ -920,6 +960,7 @@ class TalkTallyApp(tk.Tk):
         self._set_transcription_running(False)
         text = result.transcript or ""
         self._show_transcription_text(text)
+        self._register_model_token(result.model)
         self._last_transcript_path = result.output_path
         self._last_transcript_model = result.model
         self.transcript_model_var.set(
@@ -1291,10 +1332,20 @@ class TalkTallyApp(tk.Tk):
                 ),
             )
             bind(
-                self.model_var,
+                self.dictation_model_var,
                 lambda: (
-                    self._save_field("transcriber_model", self.model_var.get()),
+                    self._save_field("dictation_model", self.dictation_model_var.get()),
+                    self._register_model_token(self.dictation_model_var.get()),
                     self._restart_dictation_if_enabled(),
+                ),
+            )
+            bind(
+                self.transcription_model_var,
+                lambda: (
+                    self._save_field(
+                        "transcriber_model", self.transcription_model_var.get()
+                    ),
+                    self._register_model_token(self.transcription_model_var.get()),
                 ),
             )
 
@@ -1384,7 +1435,8 @@ class TalkTallyApp(tk.Tk):
         self._settings.dictation_enable = self.dictation_enable.get()
         self._settings.dictation_hotkey = self.dictation_hotkey.get()
         self._settings.dictation_wispr_cmd = self.dictation_wispr_cmd.get()
-        self._settings.transcriber_model = self.model_var.get()
+        self._settings.dictation_model = self.dictation_model_var.get()
+        self._settings.transcriber_model = self.transcription_model_var.get()
 
     def _apply_device_selection(self) -> None:
         # Ensure device combobox reflects saved value when available
@@ -1712,8 +1764,15 @@ class TalkTallyApp(tk.Tk):
         def run_loop_thread() -> None:
             rl = Quartz.CFRunLoopGetCurrent()
             Quartz.CFRunLoopAddSource(rl, run_loop_source, Quartz.kCFRunLoopCommonModes)
-            Quartz.CGEventTapEnable(tap, True)
-            Quartz.CFRunLoopRun()
+            try:
+                Quartz.CGEventTapEnable(tap, True)
+            except Exception as exc:  # noqa: BLE001
+                _dbg(f"Quartz hotkey enable failed: {exc}")
+                return
+            try:
+                Quartz.CFRunLoopRun()
+            except Exception as exc:  # noqa: BLE001
+                _dbg(f"Quartz hotkey loop exited: {exc}")
 
         t = threading.Thread(target=run_loop_thread, name="HotkeyQuartz", daemon=True)
         t.start()

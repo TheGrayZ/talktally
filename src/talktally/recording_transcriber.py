@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -34,6 +32,36 @@ class RecordingTranscriptionResult:
     model: str | None = None
 
 
+def model_filename_token(model: str) -> str:
+    """Return a filesystem-friendly token for embedding `model` into filenames."""
+    token_parts: list[str] = []
+    previous_sep = False
+    for ch in (model or "").strip():
+        if ch.isalnum() or ch in {"-", "."}:
+            token_parts.append(ch.lower())
+            previous_sep = False
+        else:
+            if not previous_sep:
+                token_parts.append("_")
+                previous_sep = True
+    token = "".join(token_parts).strip("_")
+    return token or "model"
+
+
+def _next_available_path(base: Path) -> Path:
+    """Return `base` or a suffixed variant `base (n)` if the path already exists."""
+    if not base.exists():
+        return base
+    stem = base.stem
+    suffix = base.suffix
+    counter = 2
+    while True:
+        candidate = base.with_name(f"{stem} ({counter}){suffix}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
 def transcribe_recording(
     audio_path: Path,
     *,
@@ -59,20 +87,16 @@ def transcribe_recording(
     text = transcriber.transcribe(audio_path)
     output: Path | None = None
     if write_text:
-        output = audio_path.with_suffix(".txt")
-        if not overwrite and output.exists():
-            raise FileExistsError(str(output))
+        if model:
+            token = model_filename_token(model)
+            output = audio_path.with_name(f"{audio_path.stem}__{token}.txt")
+        else:
+            output = audio_path.with_suffix(".txt")
+        if output.exists():
+            if not overwrite:
+                raise FileExistsError(str(output))
+            output = _next_available_path(output)
         output.write_text(text, encoding="utf-8")
-        try:
-            metadata = {
-                "model": model,
-                "source": audio_path.name,
-                "created_at": datetime.now().isoformat(timespec="seconds"),
-            }
-            meta_path = output.with_suffix(output.suffix + ".meta.json")
-            meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        except Exception:
-            pass
     return RecordingTranscriptionResult(
         source=audio_path,
         transcript=text,

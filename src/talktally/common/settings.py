@@ -78,7 +78,9 @@ class Settings:
     dictation_hotkey: str = "right_option"
     # Command (or absolute path) to local transcriber; 'whisper' (OpenAI) by default
     dictation_wispr_cmd: str = "whisper"
-    # Shared model selection for dictation & transcription helpers
+    # Independent model selections for dictation and transcription
+    dictation_model: str = "tiny"
+    # Batch transcription (recordings) model selection
     transcriber_model: str = "tiny"
     # Audio capture settings for dictation
     dictation_sample_rate: int = 16_000
@@ -97,6 +99,12 @@ def load_settings() -> Settings:
             raw = {}
     except Exception:
         raw = {}
+
+    # Migrate older configs that only stored a single model value
+    if "dictation_model" not in raw and isinstance(raw.get("transcriber_model"), str):
+        raw["dictation_model"] = raw["transcriber_model"]
+    if "transcriber_model" not in raw and isinstance(raw.get("dictation_model"), str):
+        raw["transcriber_model"] = raw["dictation_model"]
 
     # Only keep known keys; fall back to defaults for missing/invalid entries
     defaults = asdict(Settings())

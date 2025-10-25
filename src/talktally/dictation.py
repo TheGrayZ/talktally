@@ -68,7 +68,10 @@ class DictationAgent:
         self._cfg = DictationConfig(
             hotkey_token=settings.dictation_hotkey,
             wispr_cmd=settings.dictation_wispr_cmd,
-            model=getattr(settings, "transcriber_model", "tiny"),
+            model=(
+                getattr(settings, "dictation_model", None)
+                or getattr(settings, "transcriber_model", "tiny")
+            ),
             sample_rate=settings.dictation_sample_rate,
         )
         self._listener: Optional[object] = None
@@ -188,9 +191,16 @@ class DictationAgent:
         def run_loop_thread() -> None:
             rl = Quartz.CFRunLoopGetCurrent()
             Quartz.CFRunLoopAddSource(rl, run_loop_source, Quartz.kCFRunLoopCommonModes)
-            Quartz.CGEventTapEnable(tap, True)
+            try:
+                Quartz.CGEventTapEnable(tap, True)
+            except Exception as exc:  # noqa: BLE001
+                _dbg(f"event tap enable failed: {exc}")
+                return
             _dbg("event tap enabled")
-            Quartz.CFRunLoopRun()
+            try:
+                Quartz.CFRunLoopRun()
+            except Exception as exc:  # noqa: BLE001
+                _dbg(f"event tap loop exited: {exc}")
 
         t = threading.Thread(
             target=run_loop_thread, name="DictationHotkey", daemon=True

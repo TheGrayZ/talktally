@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from talktally.common.settings import load_settings, save_settings, Settings
-from talktally.dictation import _mac_keycode_from_token
+from talktally.dictation import DictationAgent, _mac_keycode_from_token
 
 
 def test_dictation_settings_defaults_and_roundtrip(tmp_path: Path, monkeypatch) -> None:
@@ -16,24 +16,38 @@ def test_dictation_settings_defaults_and_roundtrip(tmp_path: Path, monkeypatch) 
     # Defaults
     assert getattr(s, "dictation_enable", True) in (True, False)
     assert getattr(s, "dictation_hotkey", "right_option")
+    assert getattr(s, "dictation_model", "tiny") == "tiny"
     assert getattr(s, "transcriber_model", "tiny") == "tiny"
 
     # Change and save
     s.dictation_enable = False
     s.dictation_hotkey = "left_option"
-    s.transcriber_model = "base"
+    s.dictation_model = "base"
+    s.transcriber_model = "small"
     save_settings(s)
 
     s2 = load_settings()
     assert s2.dictation_enable is False
     assert s2.dictation_hotkey == "left_option"
-    assert s2.transcriber_model == "base"
+    assert s2.dictation_model == "base"
+    assert s2.transcriber_model == "small"
 
     # Verify JSON persisted
     data = json.loads(settings_file.read_text())
     assert data["dictation_hotkey"] == "left_option"
-    assert data["transcriber_model"] == "base"
+    assert data["dictation_model"] == "base"
+    assert data["transcriber_model"] == "small"
     assert "dictation_wispr_args" not in data
+
+
+def test_dictation_agent_uses_dictation_model() -> None:
+    settings = Settings()
+    settings.dictation_model = "medium"
+    settings.transcriber_model = "large"
+
+    agent = DictationAgent(settings)
+
+    assert agent._cfg.model == "medium"  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize(

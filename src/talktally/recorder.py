@@ -2,6 +2,7 @@
 
 Encapsulates sounddevice stream, channel routing, and optional output writers.
 """
+
 from __future__ import annotations
 
 import queue
@@ -15,7 +16,7 @@ import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
-from .common.fs import unique_path
+from .common.fs import unique_path, prefixed_with_end_timestamp
 
 
 @dataclass
@@ -74,6 +75,11 @@ class AudioRecorder:
         self._f_mix: Optional[sf.SoundFile] = None
         self._start_time: Optional[float] = None
 
+        # Paths of open output files (for post-stop renaming)
+        self._p_mic: Optional[Path] = None
+        self._p_sys: Optional[Path] = None
+        self._p_mix: Optional[Path] = None
+
         self._cfg: Optional[RecorderConfig] = None
 
     # ---------- Public API ----------
@@ -94,26 +100,49 @@ class AudioRecorder:
         if cfg.outputs.mic:
             self._q_mic = queue.Queue(maxsize=100)
             mic_path = unique_path(cfg.output_dir / cfg.mic_filename)
+            self._p_mic = Path(mic_path)
             self._f_mic = sf.SoundFile(
-                mic_path, mode="w", samplerate=cfg.sample_rate, channels=len(cfg.mic_channels), subtype="PCM_16"
+                mic_path,
+                mode="w",
+                samplerate=cfg.sample_rate,
+                channels=len(cfg.mic_channels),
+                subtype="PCM_16",
             )
-            self._t_mic = threading.Thread(target=self._writer, args=(self._q_mic, self._f_mic), daemon=True)
+            self._t_mic = threading.Thread(
+                target=self._writer, args=(self._q_mic, self._f_mic), daemon=True
+            )
             self._t_mic.start()
 
         if cfg.outputs.system:
             self._q_sys = queue.Queue(maxsize=100)
             sys_path = unique_path(cfg.output_dir / cfg.system_filename)
+            self._p_sys = Path(sys_path)
             self._f_sys = sf.SoundFile(
-                sys_path, mode="w", samplerate=cfg.sample_rate, channels=len(cfg.system_channels), subtype="PCM_16"
+                sys_path,
+                mode="w",
+                samplerate=cfg.sample_rate,
+                channels=len(cfg.system_channels),
+                subtype="PCM_16",
             )
-            self._t_sys = threading.Thread(target=self._writer, args=(self._q_sys, self._f_sys), daemon=True)
+            self._t_sys = threading.Thread(
+                target=self._writer, args=(self._q_sys, self._f_sys), daemon=True
+            )
             self._t_sys.start()
 
         if cfg.outputs.mixed_stereo:
             self._q_mix = queue.Queue(maxsize=100)
             mix_path = unique_path(cfg.output_dir / cfg.mixed_filename)
-            self._f_mix = sf.SoundFile(mix_path, mode="w", samplerate=cfg.sample_rate, channels=2, subtype="PCM_16")
-            self._t_mix = threading.Thread(target=self._writer, args=(self._q_mix, self._f_mix), daemon=True)
+            self._p_mix = Path(mix_path)
+            self._f_mix = sf.SoundFile(
+                mix_path,
+                mode="w",
+                samplerate=cfg.sample_rate,
+                channels=2,
+                subtype="PCM_16",
+            )
+            self._t_mix = threading.Thread(
+                target=self._writer, args=(self._q_mix, self._f_mix), daemon=True
+            )
             self._t_mix.start()
 
         # Start stream
@@ -133,6 +162,7 @@ class AudioRecorder:
         if self._stream is None:
             return
         self._stop.set()
+        end_ts = time.time()
         try:
             self._stream.stop()
         finally:
@@ -144,9 +174,20 @@ class AudioRecorder:
         for f in (self._f_mic, self._f_sys, self._f_mix):
             if f is not None:
                 f.close()
+
+        # After files are closed, rename them with end timestamp prefix
+        for p in (self._p_mic, self._p_sys, self._p_mix):
+            if p is not None and p.exists():
+                try:
+                    target = prefixed_with_end_timestamp(p, end_ts)
+                    p.rename(target)
+                except Exception as e:  # pragma: no cover - best-effort rename
+                    print(f"Failed to rename {p} with timestamp: {e}", flush=True)
+
         self._f_mic = self._f_sys = self._f_mix = None
         self._q_mic = self._q_sys = self._q_mix = None
         self._t_mic = self._t_sys = self._t_mix = None
+        self._p_mic = self._p_sys = self._p_mix = None
         self._cfg = None
         self._start_time = None
 

@@ -30,12 +30,16 @@ def _default_config_dir() -> Path:
     if sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support" / APP_NAME
     elif sys.platform.startswith("win"):
-        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / APP_NAME
+        base = (
+            Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+            / APP_NAME
+        )
     else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP_NAME.lower()
+        base = (
+            Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+            / APP_NAME.lower()
+        )
     return base / "settings.json"
-
-
 
 
 @dataclass
@@ -54,11 +58,19 @@ class Settings:
     output_system: bool = True
     output_mixed: bool = True
 
+    # File format and encoding settings (apply to all outputs)
+    file_format: str = "wav"  # wav | mp3 | flac
+    wav_sample_rate: int = 48_000
+    wav_bit_depth: int = 16  # 16 or 24
+    mp3_bitrate_kbps: int = 192  # 96..320
+    flac_sample_rate: int = 48_000
+    flac_bit_depth: int = 16
+    flac_level: int = 5  # 0..8
+
     # Hotkey and alerts
     enable_hotkey: bool = False
     hotkey: str = "cmd+shift+r"
     play_sounds: bool = True
-
 
 
 def get_settings_path() -> Path:

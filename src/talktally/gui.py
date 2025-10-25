@@ -18,7 +18,7 @@ import subprocess
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .recorder import AudioRecorder, RecorderConfig, OutputSelection, list_input_devices
 from .recorder import input_channel_count
@@ -29,6 +29,273 @@ from .recording_transcriber import (
     RecordingTranscriptionResult,
     model_filename_token,
 )
+
+HOTKEY_ALLOWED_KEYS: set[str] = {
+    *(chr(c) for c in range(ord("a"), ord("z") + 1)),
+    *[str(d) for d in range(0, 10)],
+}
+
+MODIFIER_ORDER = ("cmd", "ctrl", "alt", "shift")
+
+MODIFIER_KEYSYMS: dict[str, str] = {
+    "meta_l": "cmd",
+    "meta_r": "cmd",
+    "command": "cmd",
+    "cmd": "cmd",
+    "control": "ctrl",
+    "control_l": "ctrl",
+    "control_r": "ctrl",
+    "ctrl_l": "ctrl",
+    "ctrl_r": "ctrl",
+    "option_l": "alt",
+    "option_r": "alt",
+    "alt_l": "alt",
+    "alt_r": "alt",
+    "iso_level3_shift": "alt",
+    "shift": "shift",
+    "shift_l": "shift",
+    "shift_r": "shift",
+}
+
+DICTATION_KEY_ALIASES: dict[str, str] = {
+    "option_l": "left_option",
+    "alt_l": "left_option",
+    "option_r": "right_option",
+    "alt_r": "right_option",
+    "caps_lock": "caps_lock",
+    "capslock": "caps_lock",
+    "f17": "f17",
+    "f18": "f18",
+    "f19": "f19",
+    "f20": "f20",
+}
+
+
+def format_hotkey_sequence(modifiers: set[str], key: str | None) -> str | None:
+    """Format modifiers + key into canonical string, or None if unsupported."""
+    if not key:
+        return None
+    key = key.lower()
+    if key not in HOTKEY_ALLOWED_KEYS:
+        return None
+    ordered_mods = [m for m in MODIFIER_ORDER if m in modifiers]
+    if ordered_mods:
+        return "+".join((*ordered_mods, key))
+    return key
+
+
+def dictation_token_from_keysym(keysym: str, keycode: int) -> str | None:
+    """Return the dictation token for a Tk keysym/keycode combination."""
+    if not keysym:
+        return None
+    sym_lower = keysym.lower()
+    if sym_lower in DICTATION_KEY_ALIASES:
+        return DICTATION_KEY_ALIASES[sym_lower]
+    if sym_lower.startswith("f") and sym_lower[1:].isdigit():
+        return sym_lower
+    if len(sym_lower) == 1 and sym_lower.isprintable():
+        # Prefer explicit keycode for arbitrary characters
+        if keycode >= 0:
+            return f"keycode:{keycode}"
+        return sym_lower
+    if keycode >= 0:
+        return f"keycode:{keycode}"
+    return None
+
+
+class HotkeyCaptureEntry(ttk.Entry):
+    """Entry widget that captures keyboard shortcuts instead of raw text."""
+
+    def __init__(
+        self,
+        parent: tk.Widget,
+        *,
+        textvariable: tk.StringVar,
+        capture_mode: str = "combo",
+        on_captured: Callable[[], None] | None = None,
+        width: int = 18,
+        style: str | None = None,
+        **kwargs,
+    ) -> None:
+        kwargs.pop("textvariable", None)
+        self._target_var = textvariable
+        self._display_var = tk.StringVar(value=textvariable.get())
+        entry_kwargs = {"textvariable": self._display_var, "width": width}
+        if style is not None:
+            entry_kwargs["style"] = style
+        entry_kwargs.update(kwargs)
+        super().__init__(parent, **entry_kwargs)
+        self.configure(state="readonly")
+
+        self._capture_mode = capture_mode
+        self._on_captured = on_captured
+        self._capturing = False
+        self._placeholder_active = False
+        self._internal_update = False
+        self._pressed_mods: set[str] = set()
+        self._pending_key: str | None = None
+
+        self._target_var.trace_add("write", self._sync_from_target)
+
+        self.bind("<FocusIn>", self._on_focus_in, add="+")
+        self.bind("<FocusOut>", self._on_focus_out, add="+")
+        self.bind("<KeyPress>", self._on_key_press, add="+")
+        self.bind("<KeyRelease>", self._on_key_release, add="+")
+
+    # -- state helpers -------------------------------------------------
+    def _sync_from_target(self, *_args) -> None:
+        if self._internal_update:
+            return
+        value = self._target_var.get()
+        self._display_var.set(value)
+        self._placeholder_active = False
+
+    def _set_target(self, value: str) -> None:
+        current = self._target_var.get()
+        if current == value:
+            self._display_var.set(value)
+            self._placeholder_active = False
+            return
+        self._internal_update = True
+        try:
+            self._target_var.set(value)
+        finally:
+            self._internal_update = False
+        self._display_var.set(value)
+        self._placeholder_active = False
+        if self._on_captured:
+            try:
+                self._on_captured()
+            except Exception:
+                pass
+
+    def _start_capture(self) -> None:
+        self._capturing = True
+        self._pressed_mods.clear()
+        self._pending_key = None
+        if not self._target_var.get():
+            self._show_placeholder()
+        else:
+            self._placeholder_active = False
+
+    def _end_capture(self) -> None:
+        self._pressed_mods.clear()
+        self._pending_key = None
+        # Keep capturing as long as the entry retains focus
+
+    def _show_placeholder(self) -> None:
+        placeholder = "Press shortcut…" if self._capture_mode == "combo" else "Press a key…"
+        self._display_var.set(placeholder)
+        self._placeholder_active = True
+
+    def _restore_value(self) -> None:
+        self._display_var.set(self._target_var.get())
+        self._placeholder_active = False
+
+    # -- event handlers ------------------------------------------------
+    def _on_focus_in(self, _event: tk.Event) -> None:
+        self._start_capture()
+
+    def _on_focus_out(self, _event: tk.Event) -> None:
+        self._capturing = False
+        self._end_capture()
+        if self._placeholder_active:
+            self._restore_value()
+
+    def _on_key_press(self, event: tk.Event) -> str | None:
+        if not self._capturing:
+            return None
+        keysym = getattr(event, "keysym", "")
+        if keysym in {"Tab", "ISO_Left_Tab"}:
+            return None
+        if keysym in {"Escape"}:
+            self._restore_value()
+            self._end_capture()
+            return "break"
+        if keysym in {"BackSpace", "Delete"}:
+            self._set_target("")
+            self._show_placeholder()
+            return "break"
+
+        modifier = self._modifier_from_keysym(keysym)
+        if modifier:
+            self._pressed_mods.add(modifier)
+            self._display_var.set(self._preview_text())
+            self._placeholder_active = False
+            return "break"
+
+        if self._capture_mode == "combo":
+            normalized = self._normalize_main_key(keysym)
+            if normalized:
+                self._pending_key = normalized
+                self._display_var.set(self._preview_text(include_key=True))
+                self._placeholder_active = False
+            else:
+                self.bell()
+            return "break"
+
+        # Single-key capture (dictation hold)
+        token = dictation_token_from_keysym(keysym, getattr(event, "keycode", -1))
+        if token:
+            self._set_target(token)
+        else:
+            self.bell()
+            self._restore_value()
+        self._end_capture()
+        return "break"
+
+    def _on_key_release(self, event: tk.Event) -> str | None:
+        if not self._capturing:
+            return None
+        keysym = getattr(event, "keysym", "")
+        if keysym in {"Tab", "ISO_Left_Tab"}:
+            return None
+
+        modifier = self._modifier_from_keysym(keysym)
+        if modifier:
+            self._pressed_mods.discard(modifier)
+            return "break"
+
+        if self._capture_mode != "combo":
+            return "break"
+
+        normalized = self._normalize_main_key(keysym)
+        if not normalized:
+            return "break"
+        value = format_hotkey_sequence(self._pressed_mods, normalized)
+        if not value:
+            self.bell()
+            self._restore_value()
+        else:
+            self._set_target(value)
+        self._end_capture()
+        return "break"
+
+    # -- helpers -------------------------------------------------------
+    @staticmethod
+    def _modifier_from_keysym(keysym: str | None) -> str | None:
+        if not keysym:
+            return None
+        return MODIFIER_KEYSYMS.get(keysym.lower())
+
+    @staticmethod
+    def _normalize_main_key(keysym: str | None) -> str | None:
+        if not keysym:
+            return None
+        sym = keysym.lower()
+        if len(sym) == 1 and sym in HOTKEY_ALLOWED_KEYS:
+            return sym
+        return None
+
+    def _preview_text(self, include_key: bool = False) -> str:
+        parts = [m for m in MODIFIER_ORDER if m in self._pressed_mods]
+        if include_key and self._pending_key:
+            parts.append(self._pending_key)
+        elif parts:
+            parts.append("…")
+        if parts:
+            return "+".join(parts)
+        return "Press shortcut…" if self._capture_mode == "combo" else "Press a key…"
 
 WHISPER_MODELS = [
     "tiny",
@@ -76,6 +343,7 @@ class TalkTallyApp(tk.Tk):
         self._refresh_devices()
         self._apply_device_selection()
         self._fit_to_content()
+        self._restore_window_geometry()
         self._bind_setting_traces()
         self._force_pynput = os.environ.get("TALKTALLY_FORCE_PYNPUT") == "1"
         if self.enable_hotkey.get():
@@ -322,36 +590,48 @@ class TalkTallyApp(tk.Tk):
         ttk.Label(hotkey_frame, text="Recorder hotkey:").grid(
             row=0, column=1, sticky="e", pady=4
         )
-        rec_hotkey_entry = ttk.Entry(hotkey_frame, textvariable=self.hotkey_var, width=22)
-        rec_hotkey_entry.grid(row=0, column=2, sticky="w", padx=6, pady=4)
-        rec_hotkey_entry.bind("<FocusOut>", lambda _e: self._restart_hotkey_if_enabled())
+        self.hotkey_entry = HotkeyCaptureEntry(
+            hotkey_frame,
+            textvariable=self.hotkey_var,
+            capture_mode="combo",
+            on_captured=self._restart_hotkey_if_enabled,
+            width=20,
+        )
+        self.hotkey_entry.grid(row=0, column=2, sticky="w", padx=6, pady=4)
+        
+        dictation_row = ttk.Frame(hotkey_frame)
+        dictation_row.grid(row=1, column=0, columnspan=5, sticky="we", padx=4, pady=4)
+        dictation_row.columnconfigure(2, weight=1)
 
         ttk.Checkbutton(
-            hotkey_frame,
+            dictation_row,
             text="Enable dictation (press & hold)",
             variable=self.dictation_enable,
             command=self._toggle_dictation_agent,
-        ).grid(row=1, column=0, sticky="w", padx=8, pady=4)
+        ).grid(row=0, column=0, sticky="w", padx=(4, 8))
         ttk.Label(
-            hotkey_frame,
+            dictation_row,
             text="Dictation hold key:",
-        ).grid(row=1, column=1, sticky="e", pady=4)
-        dict_hotkey_entry = ttk.Entry(
-            hotkey_frame, textvariable=self.dictation_hotkey, width=28
+        ).grid(row=0, column=1, sticky="e", padx=(0, 8))
+        self.dictation_hotkey_entry = HotkeyCaptureEntry(
+            dictation_row,
+            textvariable=self.dictation_hotkey,
+            capture_mode="single",
+            on_captured=self._restart_dictation_if_enabled,
+            width=24,
         )
-        dict_hotkey_entry.grid(row=1, column=2, sticky="w", padx=6, pady=4)
-        dict_hotkey_entry.bind("<FocusOut>", lambda _e: self._restart_dictation_if_enabled())
-        ttk.Label(hotkey_frame, text="Model:").grid(
-            row=1, column=3, sticky="e", padx=(12, 4), pady=4
+        self.dictation_hotkey_entry.grid(row=0, column=2, sticky="we")
+        ttk.Label(dictation_row, text="Model:").grid(
+            row=0, column=3, sticky="e", padx=(12, 4)
         )
         self.dictation_model_combo = ttk.Combobox(
-            hotkey_frame,
+            dictation_row,
             state="readonly",
             values=self._model_choices,
             textvariable=self.dictation_model_var,
             width=14,
         )
-        self.dictation_model_combo.grid(row=1, column=4, sticky="w", padx=6, pady=4)
+        self.dictation_model_combo.grid(row=0, column=4, sticky="w", padx=(0, 4))
 
         ttk.Label(hotkey_frame, text="Transcriber command:").grid(
             row=2, column=1, sticky="e", pady=4
@@ -1185,8 +1465,25 @@ class TalkTallyApp(tk.Tk):
         self.update_idletasks()
         w = max(600, self.winfo_reqwidth() + 20)
         h = max(520, self.winfo_reqheight() + 20)
-        self.minsize(w, h)
+        self.minsize(640, 540)
         self.geometry(f"{w}x{h}")
+
+    def _restore_window_geometry(self) -> None:
+        width = getattr(self._settings, "window_width", 0)
+        height = getattr(self._settings, "window_height", 0)
+        if width and height:
+            width = max(640, int(width))
+            height = max(540, int(height))
+            self.geometry(f"{width}x{height}")
+
+    def _persist_geometry(self) -> None:
+        try:
+            width = max(640, int(self.winfo_width()))
+            height = max(540, int(self.winfo_height()))
+        except Exception:
+            return
+        self._settings.window_width = width
+        self._settings.window_height = height
 
     # ------- Overlay -------
     def _create_overlay(self) -> None:
@@ -1866,6 +2163,7 @@ class TalkTallyApp(tk.Tk):
         # Persist latest settings (including geometry) before closing
         try:
             self._update_settings_from_ui()
+            self._persist_geometry()
             save_settings(self._settings)
         except Exception:
             pass

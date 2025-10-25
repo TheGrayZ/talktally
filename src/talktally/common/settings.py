@@ -67,6 +67,10 @@ class Settings:
     flac_bit_depth: int = 16
     flac_level: int = 5  # 0..8
 
+    # Window geometry
+    window_width: int = 960
+    window_height: int = 700
+
     # Hotkey and alerts (recorder)
     enable_hotkey: bool = False
     hotkey: str = "cmd+shift+r"

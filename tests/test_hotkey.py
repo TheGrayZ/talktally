@@ -18,6 +18,21 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_hotkey_format_helpers():
+    from talktally.gui import format_hotkey_sequence, dictation_token_from_keysym
+
+    assert format_hotkey_sequence({"cmd", "shift"}, "r") == "cmd+shift+r"
+    assert format_hotkey_sequence(set(), "a") == "a"
+    assert format_hotkey_sequence({"alt"}, "4") == "alt+4"
+    assert format_hotkey_sequence({"cmd"}, None) is None
+    assert format_hotkey_sequence(set(), "space") is None
+
+    assert dictation_token_from_keysym("Option_L", 58) == "left_option"
+    assert dictation_token_from_keysym("Option_R", 61) == "right_option"
+    assert dictation_token_from_keysym("F17", 64) == "f17"
+    assert dictation_token_from_keysym("Unknown", 123) == "keycode:123"
+
+
 def _install_fake_pynput(monkeypatch, capture_container):
     """Install a fake 'pynput.keyboard.GlobalHotKeys' that records mapping and allows triggering."""
 

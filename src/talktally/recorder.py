@@ -19,6 +19,10 @@ import soundfile as sf
 from .common.fs import unique_path, prefixed_with_end_timestamp
 
 
+# Sentinel used to signal writer threads to finish after draining
+_SENTINEL: None = None
+
+
 @dataclass
 class OutputSelection:
     mic: bool = True
@@ -112,7 +116,7 @@ class AudioRecorder:
                 subtype="PCM_16",
             )
             self._t_mic = threading.Thread(
-                target=self._writer, args=(self._q_mic, self._f_mic), daemon=True
+                target=self._writer, args=(self._q_mic, self._f_mic), daemon=False
             )
             self._t_mic.start()
 
@@ -128,7 +132,7 @@ class AudioRecorder:
                 subtype="PCM_16",
             )
             self._t_sys = threading.Thread(
-                target=self._writer, args=(self._q_sys, self._f_sys), daemon=True
+                target=self._writer, args=(self._q_sys, self._f_sys), daemon=False
             )
             self._t_sys.start()
 
@@ -144,7 +148,7 @@ class AudioRecorder:
                 subtype="PCM_16",
             )
             self._t_mix = threading.Thread(
-                target=self._writer, args=(self._q_mix, self._f_mix), daemon=True
+                target=self._writer, args=(self._q_mix, self._f_mix), daemon=False
             )
             self._t_mix.start()
 
@@ -172,8 +176,20 @@ class AudioRecorder:
             self._stream.close()
             self._stream = None
 
-        # Give writers a moment to flush
-        time.sleep(0.3)
+        # Signal writer threads to finish after draining
+        for q in (self._q_mic, self._q_sys, self._q_mix):
+            if q is not None:
+                try:
+                    q.put_nowait(_SENTINEL)
+                except Exception:
+                    pass
+
+        # Join writer threads to avoid races with file.close()
+        for t in (self._t_mic, self._t_sys, self._t_mix):
+            if t is not None:
+                t.join(timeout=2.0)
+
+        # Now it is safe to close files
         for f in (self._f_mic, self._f_sys, self._f_mix):
             if f is not None:
                 f.close()
@@ -205,11 +221,17 @@ class AudioRecorder:
 
     # ---------- Internals ----------
     def _writer(self, q: queue.Queue, outfile: sf.SoundFile) -> None:
-        while not self._stop.is_set():
+        while True:
             try:
                 block = q.get(timeout=0.2)
             except queue.Empty:
-                continue
+                if self._stop.is_set():
+                    # No more data expected; continue waiting for sentinel or exit soon
+                    continue
+                else:
+                    continue
+            if block is _SENTINEL:
+                break
             outfile.write(block)
 
     def _callback(self, indata: np.ndarray, frames: int, time_info, status) -> None:  # type: ignore[override]
@@ -223,9 +245,15 @@ class AudioRecorder:
             mic_mono = mic_block.mean(axis=1, keepdims=True)
             mic_stereo = np.concatenate([mic_mono, mic_mono], axis=1)
             mic_stereo = np.clip(mic_stereo, -1.0, 1.0)
-            self._q_mic.put(mic_stereo.copy(), block=False)
+            try:
+                self._q_mic.put(mic_stereo.copy(), block=False)
+            except queue.Full:
+                pass
         if self._q_sys is not None:
-            self._q_sys.put(sys_block.copy(), block=False)
+            try:
+                self._q_sys.put(sys_block.copy(), block=False)
+            except queue.Full:
+                pass
         if self._q_mix is not None:
             mic_mono = mic_block.mean(axis=1, keepdims=True)
             if sys_block.shape[1] == 1:
@@ -238,7 +266,10 @@ class AudioRecorder:
             mixed_r = mic_mono + sys_r
             mixed = np.concatenate([mixed_l, mixed_r], axis=1)
             mixed = np.clip(mixed, -1.0, 1.0)
-            self._q_mix.put(mixed.copy(), block=False)
+            try:
+                self._q_mix.put(mixed.copy(), block=False)
+            except queue.Full:
+                pass
 
 
 def _find_device_id_by_name(name: str) -> tuple[int, dict]:

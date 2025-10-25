@@ -570,6 +570,9 @@ class TalkTallyApp(tk.Tk):
             if value and value not in model_choices:
                 model_choices.append(value)
         self.dictation_model_var = tk.StringVar(value=dictation_model)
+        self.dictation_append_space = tk.BooleanVar(
+            value=getattr(self._settings, "dictation_append_space", False)
+        )
         self.transcription_model_var = tk.StringVar(value=transcription_model)
         self._model_choices = tuple(model_choices)
         self._model_token_map: dict[str, str] = {}
@@ -600,7 +603,7 @@ class TalkTallyApp(tk.Tk):
         self.hotkey_entry.grid(row=0, column=2, sticky="w", padx=6, pady=4)
         
         dictation_row = ttk.Frame(hotkey_frame)
-        dictation_row.grid(row=1, column=0, columnspan=5, sticky="we", padx=4, pady=4)
+        dictation_row.grid(row=1, column=0, columnspan=6, sticky="we", padx=4, pady=4)
         dictation_row.columnconfigure(2, weight=1)
 
         ttk.Checkbutton(
@@ -632,6 +635,12 @@ class TalkTallyApp(tk.Tk):
             width=14,
         )
         self.dictation_model_combo.grid(row=0, column=4, sticky="w", padx=(0, 4))
+        ttk.Checkbutton(
+            dictation_row,
+            text="Add trailing space",
+            variable=self.dictation_append_space,
+            command=self._restart_dictation_if_enabled,
+        ).grid(row=0, column=5, sticky="w", padx=(8, 0))
 
         ttk.Label(hotkey_frame, text="Transcriber command:").grid(
             row=2, column=1, sticky="e", pady=4
@@ -1646,6 +1655,15 @@ class TalkTallyApp(tk.Tk):
                 ),
             )
             bind(
+                self.dictation_append_space,
+                lambda: (
+                    self._save_field(
+                        "dictation_append_space", self.dictation_append_space.get()
+                    ),
+                    self._restart_dictation_if_enabled(),
+                ),
+            )
+            bind(
                 self.transcription_model_var,
                 lambda: (
                     self._save_field(
@@ -1742,6 +1760,7 @@ class TalkTallyApp(tk.Tk):
         self._settings.dictation_hotkey = self.dictation_hotkey.get()
         self._settings.dictation_wispr_cmd = self.dictation_wispr_cmd.get()
         self._settings.dictation_model = self.dictation_model_var.get()
+        self._settings.dictation_append_space = self.dictation_append_space.get()
         self._settings.transcriber_model = self.transcription_model_var.get()
 
     def _apply_device_selection(self) -> None:

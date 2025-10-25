@@ -86,6 +86,8 @@ class Settings:
     dictation_model: str = "tiny"
     # Batch transcription (recordings) model selection
     transcriber_model: str = "tiny"
+    # Append space after dictation output
+    dictation_append_space: bool = False
     # Audio capture settings for dictation
     dictation_sample_rate: int = 16_000
 

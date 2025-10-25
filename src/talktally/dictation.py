@@ -53,6 +53,7 @@ class DictationConfig:
     hotkey_token: str
     wispr_cmd: str = "wispr"
     model: str = "tiny"
+    append_space: bool = False
     sample_rate: int = 16_000
 
 
@@ -72,6 +73,7 @@ class DictationAgent:
                 getattr(settings, "dictation_model", None)
                 or getattr(settings, "transcriber_model", "tiny")
             ),
+            append_space=getattr(settings, "dictation_append_space", False),
             sample_rate=settings.dictation_sample_rate,
         )
         self._listener: Optional[object] = None
@@ -272,6 +274,8 @@ class DictationAgent:
                 text = transcriber.transcribe(wav_path)
                 _dbg(f"transcribe done len={len(text) if text else 0}")
                 if text:
+                    if self._cfg.append_space:
+                        text = text.rstrip() + " "
                     _dbg(f"pasting first20='{text[:20]}'…")
                     _paste_text(text)
                     # Hide after clipboard has the text
@@ -375,7 +379,23 @@ class _MicCapturer:
             self._stream.close()
             self._stream = None
         # Signal writer to finish
-        self._q.put_nowait(np.array([]))
+        sentinel = np.array([])
+        try:
+            self._q.put(sentinel, timeout=1.0)
+        except queue.Full:
+            _dbg("MicCapturer.stop queue full; draining before signalling")
+            drained = False
+            while True:
+                try:
+                    _ = self._q.get_nowait()
+                    drained = True
+                except queue.Empty:
+                    break
+            try:
+                self._q.put_nowait(sentinel)
+            except queue.Full:
+                if not drained:
+                    _dbg("MicCapturer.stop: unable to enqueue sentinel; proceeding")
         if self._writer is not None:
             self._writer.join(timeout=1.5)
         if self._f is not None:
@@ -420,6 +440,9 @@ class _MicHud:
     - transcribing: orange dot
     """
 
+    _VIEW_CLASS_NAME = "TalkTallyMicHUDView"
+    _shared_view_class = None
+
     def __init__(self) -> None:
         self._avail = False
         self._window = None
@@ -431,6 +454,42 @@ class _MicHud:
             self._avail = True
         except Exception:
             self._AppKit = None  # type: ignore
+
+    def _resolve_view_class(self, AppKit):  # noqa: ANN001
+        if self._view_class is not None:
+            return self._view_class
+
+        shared = _MicHud._shared_view_class
+        if shared is not None:
+            self._view_class = shared
+            return shared
+
+        try:
+            existing = AppKit.NSClassFromString(self._VIEW_CLASS_NAME)
+        except Exception:
+            existing = None
+        if existing is not None:
+            self._view_class = existing
+            _MicHud._shared_view_class = existing
+            return existing
+
+        def drawRect_(self_view, _rect):  # noqa: N802
+            AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                *(getattr(self_view, "tt_color", (0.88, 0.14, 0.14, 0.9)))
+            ).set()
+            path = AppKit.NSBezierPath.bezierPathWithOvalInRect_(
+                AppKit.NSMakeRect(4, 4, 20, 20)
+            )
+            path.fill()
+
+        view_class = type(
+            self._VIEW_CLASS_NAME,
+            (AppKit.NSView,),
+            {"drawRect_": drawRect_},
+        )
+        self._view_class = view_class
+        _MicHud._shared_view_class = view_class
+        return view_class
 
     def _ensure_window(self) -> None:
         if not self._avail:
@@ -449,22 +508,8 @@ class _MicHud:
             self._window.setBackgroundColor_(AppKit.NSColor.clearColor())
             self._window.setLevel_(AppKit.NSStatusWindowLevel)
             self._window.setIgnoresMouseEvents_(True)
-            # Prepare custom view class once to avoid redefinition
-            if self._view_class is None:
-
-                def drawRect_(self_view, _rect):  # noqa: N802
-                    AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(
-                        *(getattr(self_view, "tt_color", (0.88, 0.14, 0.14, 0.9)))
-                    ).set()
-                    path = AppKit.NSBezierPath.bezierPathWithOvalInRect_(
-                        AppKit.NSMakeRect(4, 4, 20, 20)
-                    )
-                    path.fill()
-
-                self._view_class = type(
-                    "TalkTallyMicHUDView", (AppKit.NSView,), {"drawRect_": drawRect_}
-                )
-            view = self._view_class.alloc().initWithFrame_(rect)
+            view_class = self._resolve_view_class(AppKit)
+            view = view_class.alloc().initWithFrame_(rect)
             # default red
             setattr(view, "tt_color", (0.88, 0.14, 0.14, 0.9))
             self._window.setContentView_(view)

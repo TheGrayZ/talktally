@@ -16,23 +16,24 @@ def test_dictation_settings_defaults_and_roundtrip(tmp_path: Path, monkeypatch) 
     # Defaults
     assert getattr(s, "dictation_enable", True) in (True, False)
     assert getattr(s, "dictation_hotkey", "right_option")
-    assert getattr(s, "dictation_wispr_args", "--model tiny")
+    assert getattr(s, "transcriber_model", "tiny") == "tiny"
 
     # Change and save
     s.dictation_enable = False
     s.dictation_hotkey = "left_option"
-    s.dictation_wispr_args = "--model base"
+    s.transcriber_model = "base"
     save_settings(s)
 
     s2 = load_settings()
     assert s2.dictation_enable is False
     assert s2.dictation_hotkey == "left_option"
-    assert s2.dictation_wispr_args == "--model base"
+    assert s2.transcriber_model == "base"
 
     # Verify JSON persisted
     data = json.loads(settings_file.read_text())
     assert data["dictation_hotkey"] == "left_option"
-    assert data["dictation_wispr_args"] == "--model base"
+    assert data["transcriber_model"] == "base"
+    assert "dictation_wispr_args" not in data
 
 
 @pytest.mark.parametrize(

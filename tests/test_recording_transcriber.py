@@ -4,8 +4,6 @@ import os
 import time
 from pathlib import Path
 
-import pytest
-
 from talktally.recording_transcriber import (
     list_recordings,
     transcribe_recording,
@@ -53,6 +51,7 @@ def test_transcribe_recording_writes_text(monkeypatch, tmp_path: Path) -> None:
     result = transcribe_recording(
         audio,
         cmd="dummy",
+        model="tiny",
         extra_args="--fast",
         debug=lambda msg: None,
     )
@@ -63,3 +62,4 @@ def test_transcribe_recording_writes_text(monkeypatch, tmp_path: Path) -> None:
     assert result.output_path is not None
     assert result.output_path.read_text() == "hello world"
     assert captured["path"] == audio
+    assert captured["init"]["kwargs"]["model"] == "tiny"

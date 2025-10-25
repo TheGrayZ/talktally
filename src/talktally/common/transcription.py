@@ -23,15 +23,29 @@ def _as_command_parts(cmd: str | Sequence[str]) -> list[str]:
     return [p for p in parts if p]
 
 
+def _contains_model_flag(args: Sequence[str]) -> bool:
+    for item in args:
+        token = item.strip()
+        if not token:
+            continue
+        if token in {"--model", "-m"}:
+            return True
+        if token.startswith("--model="):
+            return True
+    return False
+
+
 @dataclass(slots=True)
 class LocalTranscriber:
     """Best-effort interface to local whisper/wispr style CLIs."""
 
     cmd: str | Sequence[str] = "whisper"
     extra_args: str | Sequence[str] = ""
+    model: str | None = None
     debug: Callable[[str], None] = _default_debug
     _cmd: list[str] = field(init=False, repr=False)
     _extra: list[str] = field(init=False, repr=False)
+    _model: str | None = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         import shutil
@@ -48,11 +62,14 @@ class LocalTranscriber:
             self._extra = shlex.split(self.extra_args)
         else:
             self._extra = list(self.extra_args)
-        self.debug(
-            "transcriber command = "
-            + " ".join(self._cmd)
-            + (f" extra={' '.join(self._extra)}" if self._extra else "")
-        )
+        model = (self.model or "").strip()
+        self._model = model or None
+        message = "transcriber command = " + " ".join(self._cmd)
+        if self._model:
+            message += f" model={self._model}"
+        if self._extra:
+            message += f" extra={' '.join(self._extra)}"
+        self.debug(message)
 
     def transcribe(self, audio_path: str | Path) -> str:
         """Return normalized single-line transcript text."""
@@ -73,6 +90,8 @@ class LocalTranscriber:
         self.debug(f"whisper tmpdir={tmpdir} expect_txt={txt_path.name}")
         try:
             cmd = list(self._cmd) + [str(audio_path)]
+            if self._model and not _contains_model_flag(cmd) and not _contains_model_flag(self._extra):
+                cmd.extend(["--model", self._model])
             if self._extra:
                 cmd.extend(self._extra)
             cmd.extend(
@@ -147,6 +166,8 @@ class LocalTranscriber:
     def _transcribe_stdout_tool(self, audio_path: Path) -> str:
         try:
             cmd = list(self._cmd) + [str(audio_path)]
+            if self._model and not _contains_model_flag(cmd) and not _contains_model_flag(self._extra):
+                cmd.extend(["--model", self._model])
             if self._extra:
                 cmd.extend(self._extra)
             proc = subprocess.run(

@@ -52,7 +52,7 @@ def _warn_accessibility_permissions() -> None:
 class DictationConfig:
     hotkey_token: str
     wispr_cmd: str = "wispr"
-    wispr_args: str = ""
+    model: str = "tiny"
     sample_rate: int = 16_000
 
 
@@ -68,7 +68,7 @@ class DictationAgent:
         self._cfg = DictationConfig(
             hotkey_token=settings.dictation_hotkey,
             wispr_cmd=settings.dictation_wispr_cmd,
-            wispr_args=getattr(settings, "dictation_wispr_args", "--model tiny"),
+            model=getattr(settings, "transcriber_model", "tiny"),
             sample_rate=settings.dictation_sample_rate,
         )
         self._listener: Optional[object] = None
@@ -256,7 +256,7 @@ class DictationAgent:
                 _dbg(f"transcribe begin: cmd={self._cfg.wispr_cmd}")
                 transcriber = LocalTranscriber(
                     cmd=self._cfg.wispr_cmd,
-                    extra_args=self._cfg.wispr_args,
+                    model=self._cfg.model,
                     debug=_dbg,
                 )
                 text = transcriber.transcribe(wav_path)

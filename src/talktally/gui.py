@@ -20,12 +20,25 @@ from pathlib import Path
 from typing import Optional
 
 from .recorder import AudioRecorder, RecorderConfig, OutputSelection, list_input_devices
+from .recorder import input_channel_count
 from .common.settings import Settings, load_settings, save_settings
 from .recording_transcriber import (
     list_recordings,
     transcribe_recording,
     RecordingTranscriptionResult,
 )
+
+WHISPER_MODELS = [
+    "tiny",
+    "tiny.en",
+    "base",
+    "base.en",
+    "small",
+    "small.en",
+    "medium",
+    "large",
+    "large-v2",
+]
 
 
 def _dbg(msg: str) -> None:
@@ -80,41 +93,63 @@ class TalkTallyApp(tk.Tk):
             dev_frame, textvariable=self.device_var, state="readonly"
         )
         self.device_cb.pack(side="left", fill="x", expand=True, padx=8, pady=8)
+        self.device_cb.bind("<<ComboboxSelected>>", lambda _e: self._on_device_selected())
         ttk.Button(dev_frame, text="Refresh", command=self._refresh_devices).pack(
             side="right", padx=8, pady=8
         )
 
         # Channel mapping
-        ch_frame = ttk.LabelFrame(self, text="Channel Mapping (zero-based indices)")
-        ch_frame.pack(fill="x", **pad)
-        ttk.Label(ch_frame, text="Mic channels:").grid(
-            row=0, column=0, sticky="w", padx=8, pady=4
-        )
-        ttk.Label(ch_frame, text="System channels:").grid(
-            row=1, column=0, sticky="w", padx=8, pady=4
-        )
         self.mic_ch_var = tk.StringVar(value=self._settings.mic_channels)
         self.sys_ch_var = tk.StringVar(value=self._settings.system_channels)
-        ttk.Entry(ch_frame, textvariable=self.mic_ch_var, width=20).grid(
-            row=0, column=1, sticky="w", padx=8, pady=4
+        ch_frame = ttk.LabelFrame(self, text="Channel Mapping")
+        ch_frame.pack(fill="x", **pad)
+        ch_frame.columnconfigure(1, weight=1)
+        ch_frame.columnconfigure(3, weight=1)
+        self.channel_info_var = tk.StringVar(value="")
+        ttk.Label(ch_frame, textvariable=self.channel_info_var).grid(
+            row=0, column=0, columnspan=4, sticky="w", padx=8, pady=(4, 0)
         )
-        ttk.Entry(ch_frame, textvariable=self.sys_ch_var, width=20).grid(
-            row=1, column=1, sticky="w", padx=8, pady=4
+        ttk.Label(ch_frame, text="Mic channels:").grid(
+            row=1, column=0, sticky="nw", padx=8, pady=(6, 2)
         )
+        self.mic_listbox = tk.Listbox(
+            ch_frame,
+            height=5,
+            selectmode="extended",
+            exportselection=False,
+            width=10,
+        )
+        self.mic_listbox.grid(row=1, column=1, sticky="nwe", padx=(0, 12), pady=(6, 2))
+        self.mic_listbox.bind("<<ListboxSelect>>", lambda _e: self._on_channel_select("mic"))
+        ttk.Label(ch_frame, text="System channels:").grid(
+            row=1, column=2, sticky="nw", padx=0, pady=(6, 2)
+        )
+        self.sys_listbox = tk.Listbox(
+            ch_frame,
+            height=5,
+            selectmode="extended",
+            exportselection=False,
+            width=10,
+        )
+        self.sys_listbox.grid(row=1, column=3, sticky="nwe", padx=(0, 8), pady=(6, 2))
+        self.sys_listbox.bind("<<ListboxSelect>>", lambda _e: self._on_channel_select("system"))
+        ttk.Label(
+            ch_frame, text="Hold ⌘ (or Ctrl) to pick multiple channels."
+        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 6))
 
         # Outputs
-        out_frame = ttk.LabelFrame(self, text="Outputs")
+        out_frame = ttk.LabelFrame(self, text="Output Settings")
         out_frame.pack(fill="x", **pad)
         self.var_mic = tk.BooleanVar(value=self._settings.output_mic)
         self.var_sys = tk.BooleanVar(value=self._settings.output_system)
         self.var_mix = tk.BooleanVar(value=self._settings.output_mixed)
-        ttk.Checkbutton(out_frame, text="Mic WAV", variable=self.var_mic).grid(
+        ttk.Checkbutton(out_frame, text="Mic track", variable=self.var_mic).grid(
             row=0, column=0, sticky="w", padx=8, pady=4
         )
-        ttk.Checkbutton(out_frame, text="System WAV", variable=self.var_sys).grid(
+        ttk.Checkbutton(out_frame, text="System track", variable=self.var_sys).grid(
             row=1, column=0, sticky="w", padx=8, pady=4
         )
-        ttk.Checkbutton(out_frame, text="Downmix (stereo)", variable=self.var_mix).grid(
+        ttk.Checkbutton(out_frame, text="Mixed (stereo)", variable=self.var_mix).grid(
             row=2, column=0, sticky="w", padx=8, pady=4
         )
 
@@ -222,6 +257,7 @@ class TalkTallyApp(tk.Tk):
         # Initial layout and estimate
         self._refresh_encoding_controls()
         self._update_storage_estimate()
+        self._refresh_channel_selectors()
 
         # Record button + status
         ctrl = ttk.Frame(self)
@@ -233,42 +269,35 @@ class TalkTallyApp(tk.Tk):
         self.status_var = tk.StringVar(value="Idle")
         ttk.Label(ctrl, textvariable=self.status_var).pack(side="left", padx=12)
 
-        # Hotkey + sounds
-        extras = ttk.LabelFrame(self, text="Hotkey & Alerts")
-        extras.pack(fill="x", **pad)
+        # Model settings shared by dictation & transcription
+        current_model = getattr(self._settings, "transcriber_model", "tiny") or "tiny"
+        self.model_var = tk.StringVar(value=current_model)
+        model_choices = list(WHISPER_MODELS)
+        if current_model not in model_choices:
+            model_choices.append(current_model)
+        model_frame = ttk.LabelFrame(self, text="Model Settings")
+        model_frame.pack(fill="x", **pad)
+        model_frame.columnconfigure(1, weight=1)
+        ttk.Label(model_frame, text="Whisper model:").grid(
+            row=0, column=0, sticky="e", padx=8, pady=6
+        )
+        self.model_combo = ttk.Combobox(
+            model_frame,
+            state="readonly",
+            values=model_choices,
+            textvariable=self.model_var,
+            width=16,
+        )
+        self.model_combo.grid(row=0, column=1, sticky="w", padx=6, pady=6)
+        ttk.Label(
+            model_frame,
+            text="Applies to push-to-talk dictation and batch transcription.",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 6))
+
+        # Hotkey & dictation settings
         self.enable_hotkey = tk.BooleanVar(value=self._settings.enable_hotkey)
         self.hotkey_var = tk.StringVar(value=self._settings.hotkey)
-        ttk.Checkbutton(
-            extras,
-            text="Enable global hotkey",
-            variable=self.enable_hotkey,
-            command=self._toggle_hotkey_listener,
-        ).grid(row=0, column=0, sticky="w", padx=8, pady=4)
-        ttk.Label(extras, text="Hotkey (e.g. cmd+shift+r):").grid(
-            row=0, column=1, sticky="e"
-        )
-        e = ttk.Entry(extras, textvariable=self.hotkey_var, width=22)
-        e.grid(row=0, column=2, sticky="w", padx=6)
-        e.bind("<FocusOut>", lambda _e: self._restart_hotkey_if_enabled())
-
         self.var_sounds = tk.BooleanVar(value=self._settings.play_sounds)
-        ttk.Checkbutton(
-            extras, text="Play start/stop sounds", variable=self.var_sounds
-        ).grid(row=1, column=0, sticky="w", padx=8, pady=4)
-        ttk.Label(
-            extras, text="Indicator overlay shows in top-right while recording"
-        ).grid(row=1, column=1, columnspan=2, sticky="w", padx=6)
-
-        # Tools notebook for dictation & transcription helpers
-        tools_nb = ttk.Notebook(self)
-        tools_nb.pack(fill="both", expand=True, **pad)
-
-        # Dictation tab
-        dict_tab = ttk.Frame(tools_nb)
-        tools_nb.add(dict_tab, text="Push-to-talk")
-        dict_pad = {"padx": 12, "pady": 10}
-        dict_frame = ttk.LabelFrame(dict_tab, text="Dictation (push-to-talk)")
-        dict_frame.pack(fill="x", **dict_pad)
         self.dictation_enable = tk.BooleanVar(
             value=getattr(self._settings, "dictation_enable", False)
         )
@@ -278,55 +307,70 @@ class TalkTallyApp(tk.Tk):
         self.dictation_wispr_cmd = tk.StringVar(
             value=getattr(self._settings, "dictation_wispr_cmd", "whisper")
         )
-        self.dictation_wispr_args = tk.StringVar(
-            value=getattr(self._settings, "dictation_wispr_args", "--model tiny")
-        )
+
+        hotkey_frame = ttk.LabelFrame(self, text="Hotkey & Dictation")
+        hotkey_frame.pack(fill="x", **pad)
+        hotkey_frame.columnconfigure(2, weight=1)
         ttk.Checkbutton(
-            dict_frame,
-            text="Enable dictation",
+            hotkey_frame,
+            text="Start recording",
+            variable=self.enable_hotkey,
+            command=self._toggle_hotkey_listener,
+        ).grid(row=0, column=0, sticky="w", padx=8, pady=4)
+        ttk.Label(hotkey_frame, text="Recorder hotkey:").grid(
+            row=0, column=1, sticky="e", pady=4
+        )
+        rec_hotkey_entry = ttk.Entry(hotkey_frame, textvariable=self.hotkey_var, width=22)
+        rec_hotkey_entry.grid(row=0, column=2, sticky="w", padx=6, pady=4)
+        rec_hotkey_entry.bind("<FocusOut>", lambda _e: self._restart_hotkey_if_enabled())
+
+        ttk.Checkbutton(
+            hotkey_frame,
+            text="Enable dictation (press & hold)",
             variable=self.dictation_enable,
             command=self._toggle_dictation_agent,
-        ).grid(row=0, column=0, sticky="w", padx=8, pady=4)
+        ).grid(row=1, column=0, sticky="w", padx=8, pady=4)
         ttk.Label(
-            dict_frame, text="Hold key (e.g. right_option, left_option, keycode:61):"
-        ).grid(row=0, column=1, sticky="e")
-        de = ttk.Entry(dict_frame, textvariable=self.dictation_hotkey, width=28)
-        de.grid(row=0, column=2, sticky="w", padx=6)
-        de.bind("<FocusOut>", lambda _e: self._restart_dictation_if_enabled())
+            hotkey_frame,
+            text="Dictation hold key:",
+        ).grid(row=1, column=1, sticky="e", pady=4)
+        dict_hotkey_entry = ttk.Entry(
+            hotkey_frame, textvariable=self.dictation_hotkey, width=28
+        )
+        dict_hotkey_entry.grid(row=1, column=2, sticky="w", padx=6, pady=4)
+        dict_hotkey_entry.bind("<FocusOut>", lambda _e: self._restart_dictation_if_enabled())
 
-        ttk.Label(dict_frame, text="Transcriber command:").grid(
-            row=1, column=1, sticky="e", pady=2
+        ttk.Label(hotkey_frame, text="Transcriber command:").grid(
+            row=2, column=1, sticky="e", pady=4
         )
         cmd_entry = ttk.Entry(
-            dict_frame, textvariable=self.dictation_wispr_cmd, width=28
+            hotkey_frame, textvariable=self.dictation_wispr_cmd, width=28
         )
-        cmd_entry.grid(row=1, column=2, sticky="w", padx=6, pady=2)
+        cmd_entry.grid(row=2, column=2, sticky="w", padx=6, pady=4)
         cmd_entry.bind("<FocusOut>", lambda _e: self._restart_dictation_if_enabled())
 
-        ttk.Label(dict_frame, text="Extra args (e.g. --model tiny):").grid(
-            row=2, column=1, sticky="e", pady=2
-        )
-        args_entry = ttk.Entry(
-            dict_frame, textvariable=self.dictation_wispr_args, width=38
-        )
-        args_entry.grid(row=2, column=2, sticky="w", padx=6, pady=2)
-        args_entry.bind("<FocusOut>", lambda _e: self._restart_dictation_if_enabled())
+        ttk.Checkbutton(
+            hotkey_frame, text="Play start/stop sounds", variable=self.var_sounds
+        ).grid(row=3, column=0, sticky="w", padx=8, pady=4)
+        ttk.Label(
+            hotkey_frame,
+            text="An overlay appears in the top-right while recording.",
+        ).grid(row=3, column=1, columnspan=2, sticky="w", padx=6, pady=4)
 
-        # Transcription tab
-        trans_tab = ttk.Frame(tools_nb)
-        tools_nb.add(trans_tab, text="Transcribe Recordings")
-        self._build_transcription_tab(trans_tab)
+        # Transcription panel
+        trans_section = ttk.LabelFrame(self, text="Transcribe Recordings")
+        trans_section.pack(fill="both", expand=True, **pad)
+        self._build_transcription_panel(trans_section)
 
-    def _build_transcription_tab(self, parent: tk.Widget) -> None:
-        pad = {"padx": 12, "pady": 10}
-        container = ttk.LabelFrame(parent, text="Recordings")
-        container.pack(fill="both", expand=True, **pad)
+    def _build_transcription_panel(self, parent: tk.Widget) -> None:
+        container = ttk.Frame(parent)
+        container.pack(fill="both", expand=True)
         container.columnconfigure(0, weight=1)
         container.rowconfigure(1, weight=1)
         container.rowconfigure(4, weight=2)
 
         btns = ttk.Frame(container)
-        btns.grid(row=0, column=0, sticky="we", pady=(2, 6))
+        btns.grid(row=0, column=0, sticky="we", pady=(8, 6), padx=12)
         self.btn_refresh_transcripts = ttk.Button(
             btns, text="Refresh", command=self._refresh_transcription_list
         )
@@ -336,7 +380,7 @@ class TalkTallyApp(tk.Tk):
         )
 
         list_frame = ttk.Frame(container)
-        list_frame.grid(row=1, column=0, sticky="nsew")
+        list_frame.grid(row=1, column=0, sticky="nsew", padx=12)
         list_frame.columnconfigure(0, weight=1)
         list_frame.rowconfigure(0, weight=1)
 
@@ -371,7 +415,7 @@ class TalkTallyApp(tk.Tk):
         self._last_transcript_path: Path | None = None
 
         actions = ttk.Frame(container)
-        actions.grid(row=2, column=0, sticky="we", pady=6)
+        actions.grid(row=2, column=0, sticky="we", pady=6, padx=12)
         self.btn_transcribe = ttk.Button(
             actions, text="Transcribe", command=self._start_transcription
         )
@@ -392,7 +436,7 @@ class TalkTallyApp(tk.Tk):
         self.btn_copy_transcript.pack(side="left")
 
         status_frame = ttk.Frame(container)
-        status_frame.grid(row=3, column=0, sticky="we")
+        status_frame.grid(row=3, column=0, sticky="we", padx=12)
         status_frame.columnconfigure(1, weight=1)
         self.transcription_progress = ttk.Progressbar(
             status_frame, mode="indeterminate", length=140
@@ -406,7 +450,7 @@ class TalkTallyApp(tk.Tk):
         ).grid(row=0, column=1, sticky="we", padx=(8, 0))
 
         text_frame = ttk.Frame(container)
-        text_frame.grid(row=4, column=0, sticky="nsew", pady=(4, 0))
+        text_frame.grid(row=4, column=0, sticky="nsew", pady=(4, 12), padx=12)
         text_frame.columnconfigure(0, weight=1)
         text_frame.rowconfigure(0, weight=1)
         self.transcription_text = tk.Text(
@@ -435,6 +479,75 @@ class TalkTallyApp(tk.Tk):
             self.device_cb.set(cur)
         elif names:
             self.device_cb.set(names[0])
+        self._refresh_channel_selectors()
+
+    def _on_device_selected(self) -> None:
+        self._refresh_channel_selectors()
+
+    def _refresh_channel_selectors(self) -> None:
+        if not hasattr(self, "mic_listbox"):
+            return
+        device = self.device_var.get()
+        total = input_channel_count(device) if device else 0
+        try:
+            mic_selected = self._parse_indices(self.mic_ch_var.get())
+        except ValueError:
+            mic_selected = []
+        try:
+            sys_selected = self._parse_indices(self.sys_ch_var.get())
+        except ValueError:
+            sys_selected = []
+        max_index = 0
+        for seq in (mic_selected, sys_selected):
+            if seq:
+                max_index = max(max_index, max(seq) + 1)
+        if total <= 0:
+            total = max(max_index, 4)
+        else:
+            total = max(total, max_index)
+        self._populate_channel_listbox(self.mic_listbox, mic_selected, total, "mic")
+        self._populate_channel_listbox(self.sys_listbox, sys_selected, total, "system")
+        if device and total:
+            self.channel_info_var.set(
+                f"{total} input channels detected for '{device}'."
+            )
+        elif total:
+            self.channel_info_var.set(f"{total} input channels detected.")
+        else:
+            self.channel_info_var.set(
+                "Device channel count unknown; selections are preserved."
+            )
+
+    def _populate_channel_listbox(
+        self, listbox: tk.Listbox, selected: list[int], total: int, kind: str
+    ) -> None:
+        values = [str(i) for i in range(total)]
+        current = listbox.get(0, tk.END)
+        if list(current) != values:
+            listbox.delete(0, tk.END)
+            for value in values:
+                listbox.insert(tk.END, value)
+        cleaned = sorted({idx for idx in selected if 0 <= idx < total})
+        listbox.selection_clear(0, tk.END)
+        for idx in cleaned:
+            listbox.selection_set(idx)
+        self._update_channel_var(kind, cleaned)
+
+    def _on_channel_select(self, kind: str) -> None:
+        listbox = self.mic_listbox if kind == "mic" else self.sys_listbox
+        try:
+            selected = [
+                int(listbox.get(i)) for i in listbox.curselection()  # type: ignore[arg-type]
+            ]
+        except ValueError:
+            selected = []
+        self._update_channel_var(kind, sorted(selected))
+
+    def _update_channel_var(self, kind: str, values: list[int]) -> None:
+        var = self.mic_ch_var if kind == "mic" else self.sys_ch_var
+        formatted = ",".join(str(v) for v in values)
+        if var.get() != formatted:
+            var.set(formatted)
 
     def _browse_dir(self) -> None:
         d = filedialog.askdirectory(initialdir=self.var_outdir.get() or str(Path.cwd()))
@@ -524,7 +637,7 @@ class TalkTallyApp(tk.Tk):
             result = transcribe_recording(
                 audio_path,
                 cmd=self.dictation_wispr_cmd.get() or "whisper",
-                extra_args=self.dictation_wispr_args.get(),
+                model=self.model_var.get() or None,
                 debug=_dbg,
             )
         except Exception as exc:  # noqa: BLE001
@@ -890,9 +1003,10 @@ class TalkTallyApp(tk.Tk):
                 ),
             )
             bind(
-                self.dictation_wispr_args,
-                lambda: self._save_field(
-                    "dictation_wispr_args", self.dictation_wispr_args.get()
+                self.model_var,
+                lambda: (
+                    self._save_field("transcriber_model", self.model_var.get()),
+                    self._restart_dictation_if_enabled(),
                 ),
             )
 
@@ -982,7 +1096,7 @@ class TalkTallyApp(tk.Tk):
         self._settings.dictation_enable = self.dictation_enable.get()
         self._settings.dictation_hotkey = self.dictation_hotkey.get()
         self._settings.dictation_wispr_cmd = self.dictation_wispr_cmd.get()
-        self._settings.dictation_wispr_args = self.dictation_wispr_args.get()
+        self._settings.transcriber_model = self.model_var.get()
 
     def _apply_device_selection(self) -> None:
         # Ensure device combobox reflects saved value when available
@@ -990,6 +1104,7 @@ class TalkTallyApp(tk.Tk):
         names = list(self.device_cb["values"]) or []
         if cur and cur in names:
             self.device_cb.set(cur)
+            self._refresh_channel_selectors()
 
     def _on_format_change(self) -> None:
         fmt = self.var_format.get()

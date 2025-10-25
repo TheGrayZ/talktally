@@ -78,8 +78,8 @@ class Settings:
     dictation_hotkey: str = "right_option"
     # Command (or absolute path) to local transcriber; 'whisper' (OpenAI) by default
     dictation_wispr_cmd: str = "whisper"
-    # Extra CLI arguments passed to the wispr/whisper command for faster inference
-    dictation_wispr_args: str = "--model tiny"
+    # Shared model selection for dictation & transcription helpers
+    transcriber_model: str = "tiny"
     # Audio capture settings for dictation
     dictation_sample_rate: int = 16_000
 

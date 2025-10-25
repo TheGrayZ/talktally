@@ -327,6 +327,15 @@ def list_input_devices() -> list[str]:
     return [d["name"] for d in devs if d.get("max_input_channels", 0) > 0]
 
 
+def input_channel_count(name: str) -> int:
+    """Return the number of input channels for the given device name."""
+    try:
+        _, info = _find_device_id_by_name(name)
+    except RuntimeError:
+        return 0
+    return int(info.get("max_input_channels", 0) or 0)
+
+
 def _safe_unlink(p: Optional[Path]) -> None:
     try:
         if p is not None and p.exists():

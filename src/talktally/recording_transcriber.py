@@ -35,6 +35,7 @@ def transcribe_recording(
     audio_path: Path,
     *,
     cmd: str,
+    model: str | None = None,
     extra_args: str = "",
     debug: Callable[[str], None] | None = None,
     write_text: bool = True,
@@ -42,8 +43,16 @@ def transcribe_recording(
 ) -> RecordingTranscriptionResult:
     """Transcribe `audio_path` and optionally persist a sibling .txt file."""
     if debug is None:
-        debug = lambda _msg: None
-    transcriber = LocalTranscriber(cmd=cmd, extra_args=extra_args, debug=debug)
+        def _noop(_msg: str) -> None:
+            return None
+
+        debug = _noop
+    transcriber = LocalTranscriber(
+        cmd=cmd,
+        extra_args=extra_args,
+        model=model,
+        debug=debug,
+    )
     text = transcriber.transcribe(audio_path)
     output: Path | None = None
     if write_text:

@@ -274,10 +274,13 @@ class DictationAgent:
                 text = transcriber.transcribe(wav_path)
                 _dbg(f"transcribe done len={len(text) if text else 0}")
                 if text:
-                    if self._cfg.append_space:
-                        text = text.rstrip() + " "
-                    _dbg(f"pasting first20='{text[:20]}'…")
-                    _paste_text(text)
+                    cleaned = text.rstrip()
+                    if not cleaned:
+                        _dbg("transcript empty after trimming; skipping paste")
+                        self._dispatch(self._overlay.hide)
+                    else:
+                        _dbg(f"pasting first20='{cleaned[:20]}'…")
+                        _paste_text(cleaned, append_space=self._cfg.append_space)
                     # Hide after clipboard has the text
                     self._dispatch(self._overlay.hide)
                 else:
@@ -568,7 +571,7 @@ class _MicHud:
         self._window.orderOut_(None)
 
 
-def _paste_text(s: str) -> None:
+def _paste_text(s: str, *, append_space: bool = False) -> None:
     """Paste text into current focused field via NSPasteboard + Cmd+V gesture."""
     _dbg(f"paste via AppKit len={len(s)}")
     try:
@@ -604,13 +607,38 @@ def _paste_text(s: str) -> None:
             _dbg(f"System Events paste error: {exc}")
             return False
 
+    def _send_space_system_events() -> bool:
+        osa = (
+            'tell application "System Events"\n'
+            "  key code 49\n"
+            "end tell"
+        )
+        try:
+            proc = subprocess.run(
+                ["osascript", "-l", "AppleScript", "-e", osa],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if proc.returncode != 0:
+                err = proc.stderr.decode("utf-8", errors="ignore").strip()
+                _dbg(f"System Events space failed rc={proc.returncode}: {err}")
+                if "not berechtigt" in err.lower() or "not authorized" in err.lower():
+                    _warn_accessibility_permissions()
+                return False
+            _dbg("System Events space keystroke sent")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            _dbg(f"System Events space error: {exc}")
+            return False
+
     pasteboard_type = getattr(AppKit, "NSPasteboardTypeString", "public.utf8-plain-text")
 
     # If accessibility permissions are missing, CGEvent posts are ignored. Fall back immediately.
     try:
         if hasattr(Quartz, "AXIsProcessTrusted") and not Quartz.AXIsProcessTrusted():
             _dbg("accessibility permission missing; using AppleScript fallback")
-            _paste_text_applescript(s)
+            _paste_text_applescript(s, append_space=append_space)
             return
     except Exception:
         pass
@@ -625,11 +653,16 @@ def _paste_text(s: str) -> None:
         # Give the pasteboard a moment to propagate the new owner before pasting.
         time.sleep(0.05)
 
-        if _paste_text_accessibility(s):
+        if _paste_text_accessibility(s, append_space=append_space):
             return
 
         if not _send_cmd_v_system_events():
             raise RuntimeError("System Events keystroke failed")
+        if append_space and s:
+            time.sleep(0.02)
+            if not _send_space_system_events():
+                _dbg("falling back to AppleScript space")
+                _send_space_applescript()
 
     try:
         # Ensure pasteboard interaction runs on the main thread when AppKit is available
@@ -667,10 +700,30 @@ def _paste_text(s: str) -> None:
             _perform_paste()
     except Exception as e:  # noqa: BLE001
         _dbg(f"paste: AppKit/Quartz path failed ({e}); falling back to AppleScript")
-        _paste_text_applescript(s)
+        _paste_text_applescript(s, append_space=append_space)
 
 
-def _paste_text_applescript(s: str) -> None:
+def _send_space_applescript() -> None:
+    osa = (
+        'tell application "System Events"\n'
+        "  key code 49\n"
+        "end tell"
+    )
+    try:
+        proc = subprocess.run(
+            ["osascript", "-l", "AppleScript", "-e", osa],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", errors="ignore").strip()
+            _dbg(f"AppleScript space keystroke failed rc={proc.returncode}: {err}")
+    except Exception as exc:  # noqa: BLE001
+        _dbg(f"AppleScript space error: {exc}")
+
+
+def _paste_text_applescript(s: str, *, append_space: bool = False) -> None:
     try:
         _dbg("paste via AppleScript")
         # Write to pasteboard via pbcopy
@@ -695,11 +748,13 @@ def _paste_text_applescript(s: str) -> None:
             _dbg(f"AppleScript paste keystroke failed rc={proc2.returncode}: {err}")
         else:
             _dbg("AppleScript paste sent")
+        if append_space and s:
+            _send_space_applescript()
     except Exception as e:
         _dbg(f"AppleScript paste error: {e}")
 
 
-def _paste_text_accessibility(s: str) -> bool:
+def _paste_text_accessibility(s: str, *, append_space: bool = False) -> bool:
     try:
         import Quartz  # type: ignore
     except Exception:
@@ -776,7 +831,8 @@ def _paste_text_accessibility(s: str) -> bool:
     except Exception:
         before = existing
         after = ""
-    new_value = before + s + after
+    insert = s + " " if append_space and s else s
+    new_value = before + insert + after
 
     err = Quartz.AXUIElementSetAttributeValue(
         focused, Quartz.kAXValueAttribute, new_value
@@ -788,7 +844,7 @@ def _paste_text_accessibility(s: str) -> bool:
         return False
 
     try:
-        new_loc = start + len(s)
+        new_loc = start + len(insert)
         new_range = Quartz.AXValueCreate(
             Quartz.kAXValueCFRangeType, (new_loc, 0)
         )

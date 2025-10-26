@@ -173,10 +173,10 @@ def test_dictation_append_space_controls_output(monkeypatch, tmp_path) -> None:
     from types import SimpleNamespace
     import talktally.dictation as dictation_mod
 
-    captured: list[str] = []
+    captured: list[tuple[str, bool]] = []
 
-    def fake_paste(text: str) -> None:
-        captured.append(text)
+    def fake_paste(text: str, *, append_space: bool = False) -> None:
+        captured.append((text, append_space))
 
     monkeypatch.setattr(dictation_mod, "_paste_text", fake_paste)
 
@@ -230,7 +230,7 @@ def test_dictation_append_space_controls_output(monkeypatch, tmp_path) -> None:
     run_case(True)
     run_case(False)
 
-    assert captured == ["Hello ", "Hello"]
+    assert captured == [("Hello", True), ("Hello", False)]
 
 
 @pytest.mark.parametrize(

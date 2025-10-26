@@ -643,6 +643,8 @@ class _MicHud:
     States:
     - recording: red dot
     - transcribing: orange dot
+
+    The overlay follows the cursor position while visible.
     """
 
     _VIEW_CLASS_NAME = "TalkTallyMicHUDView"
@@ -652,6 +654,8 @@ class _MicHud:
         self._avail = False
         self._window = None
         self._view_class = None
+        self._cursor_timer = None
+        self._is_visible = False
         try:
             import AppKit  # type: ignore
 
@@ -719,6 +723,63 @@ class _MicHud:
             setattr(view, "tt_color", (0.88, 0.14, 0.14, 0.9))
             self._window.setContentView_(view)
 
+    def _start_cursor_tracking(self) -> None:
+        """Start a timer to track cursor movement and update overlay position."""
+        if not self._avail or self._cursor_timer is not None:
+            return
+
+        import threading
+
+        def update_position():
+            if self._is_visible and self._window is not None:
+                try:
+                    AppKit = self._AppKit
+                    if AppKit and AppKit.NSThread.isMainThread():
+                        self._update_position_to_cursor()
+                    else:
+                        from PyObjCTools.AppHelper import callAfter  # type: ignore
+
+                        callAfter(self._update_position_to_cursor)
+                except Exception as e:
+                    _dbg(f"cursor tracking update failed: {e}")
+
+            # Schedule next update if still visible
+            if self._is_visible:
+                self._cursor_timer = threading.Timer(0.1, update_position)  # 10 FPS
+                self._cursor_timer.start()
+            else:
+                self._cursor_timer = None
+
+        self._cursor_timer = threading.Timer(0.1, update_position)
+        self._cursor_timer.start()
+        _dbg("cursor tracking started")
+
+    def _stop_cursor_tracking(self) -> None:
+        """Stop cursor tracking timer."""
+        if self._cursor_timer is not None:
+            self._cursor_timer.cancel()
+            self._cursor_timer = None
+            _dbg("cursor tracking stopped")
+
+    def _update_position_to_cursor(self) -> None:
+        """Update window position to follow cursor."""
+        if not self._avail or self._window is None:
+            return
+
+        try:
+            AppKit = self._AppKit
+            assert AppKit is not None
+
+            # Get current cursor position
+            loc = AppKit.NSEvent.mouseLocation()
+            x = loc.x + 12  # Offset to right of cursor
+            y = loc.y - 12  # Offset above cursor
+
+            # Update window position
+            self._window.setFrameOrigin_((x, y))
+        except Exception as e:
+            _dbg(f"cursor position update failed: {e}")
+
     def _show_with_color_near_cursor(
         self, color: tuple[float, float, float, float]
     ) -> None:
@@ -739,12 +800,14 @@ class _MicHud:
         view = self._window.contentView()  # type: ignore[attr-defined]
         setattr(view, "tt_color", color)
         view.setNeedsDisplay_(True)
-        # Position near mouse
-        loc = AppKit.NSEvent.mouseLocation()
-        x = loc.x + 12
-        y = loc.y - 12
-        self._window.setFrameOrigin_((x, y))
+
+        # Position near cursor initially
+        self._update_position_to_cursor()
         self._window.orderFrontRegardless()
+
+        # Start cursor tracking
+        self._is_visible = True
+        self._start_cursor_tracking()
 
     def show_recording_near_cursor(self) -> None:
         self._show_with_color_near_cursor((0.88, 0.14, 0.14, 0.9))
@@ -770,6 +833,10 @@ class _MicHud:
                 return
         except Exception:
             pass
+
+        # Stop cursor tracking and hide window
+        self._is_visible = False
+        self._stop_cursor_tracking()
         self._window.orderOut_(None)
 
 

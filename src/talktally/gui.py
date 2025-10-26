@@ -184,7 +184,9 @@ class HotkeyCaptureEntry(ttk.Entry):
         # Keep capturing as long as the entry retains focus
 
     def _show_placeholder(self) -> None:
-        placeholder = "Press shortcut…" if self._capture_mode == "combo" else "Press a key…"
+        placeholder = (
+            "Press shortcut…" if self._capture_mode == "combo" else "Press a key…"
+        )
         self._display_var.set(placeholder)
         self._placeholder_active = True
 
@@ -297,6 +299,7 @@ class HotkeyCaptureEntry(ttk.Entry):
             return "+".join(parts)
         return "Press shortcut…" if self._capture_mode == "combo" else "Press a key…"
 
+
 WHISPER_MODELS = [
     "tiny",
     "tiny.en",
@@ -348,7 +351,10 @@ class TalkTallyApp(tk.Tk):
         self._force_pynput = os.environ.get("TALKTALLY_FORCE_PYNPUT") == "1"
         if self.enable_hotkey.get():
             self._start_hotkey_listener()
-        if getattr(self._settings, "dictation_enable", False) and not self._force_pynput:
+        if (
+            getattr(self._settings, "dictation_enable", False)
+            and not self._force_pynput
+        ):
             self._start_dictation_agent()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -368,7 +374,9 @@ class TalkTallyApp(tk.Tk):
             dev_frame, textvariable=self.device_var, state="readonly"
         )
         self.device_cb.pack(side="left", fill="x", expand=True, padx=8, pady=8)
-        self.device_cb.bind("<<ComboboxSelected>>", lambda _e: self._on_device_selected())
+        self.device_cb.bind(
+            "<<ComboboxSelected>>", lambda _e: self._on_device_selected()
+        )
         ttk.Button(dev_frame, text="Refresh", command=self._refresh_devices).pack(
             side="right", padx=8, pady=8
         )
@@ -395,7 +403,9 @@ class TalkTallyApp(tk.Tk):
             width=10,
         )
         self.mic_listbox.grid(row=1, column=1, sticky="nwe", padx=(0, 12), pady=(6, 2))
-        self.mic_listbox.bind("<<ListboxSelect>>", lambda _e: self._on_channel_select("mic"))
+        self.mic_listbox.bind(
+            "<<ListboxSelect>>", lambda _e: self._on_channel_select("mic")
+        )
         ttk.Label(ch_frame, text="System channels:").grid(
             row=1, column=2, sticky="nw", padx=0, pady=(6, 2)
         )
@@ -407,10 +417,12 @@ class TalkTallyApp(tk.Tk):
             width=10,
         )
         self.sys_listbox.grid(row=1, column=3, sticky="nwe", padx=(0, 8), pady=(6, 2))
-        self.sys_listbox.bind("<<ListboxSelect>>", lambda _e: self._on_channel_select("system"))
-        ttk.Label(
-            ch_frame, text="Hold ⌘ (or Ctrl) to pick multiple channels."
-        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 6))
+        self.sys_listbox.bind(
+            "<<ListboxSelect>>", lambda _e: self._on_channel_select("system")
+        )
+        ttk.Label(ch_frame, text="Hold ⌘ (or Ctrl) to pick multiple channels.").grid(
+            row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 6)
+        )
 
         # Outputs
         out_frame = ttk.LabelFrame(root, text="Output Settings")
@@ -601,7 +613,7 @@ class TalkTallyApp(tk.Tk):
             width=20,
         )
         self.hotkey_entry.grid(row=0, column=2, sticky="w", padx=6, pady=4)
-        
+
         dictation_row = ttk.Frame(hotkey_frame)
         dictation_row.grid(row=1, column=0, columnspan=6, sticky="we", padx=4, pady=4)
         dictation_row.columnconfigure(2, weight=1)
@@ -826,6 +838,7 @@ class TalkTallyApp(tk.Tk):
 
         self._transcription_thread: threading.Thread | None = None
         self._transcription_running: bool = False
+        self._transcription_cancelled: bool = False
         self._last_transcript_path: Path | None = None
         self._last_transcript_model: str | None = None
 
@@ -835,6 +848,10 @@ class TalkTallyApp(tk.Tk):
             actions, text="Transcribe", command=self._start_transcription
         )
         self.btn_transcribe.pack(side="left")
+        self.btn_cancel_transcribe = ttk.Button(
+            actions, text="Cancel", command=self._cancel_transcription, state="disabled"
+        )
+        self.btn_cancel_transcribe.pack(side="left", padx=(6, 0))
         ttk.Label(actions, text="Model:").pack(side="left", padx=(12, 4))
         self.transcription_model_combo = ttk.Combobox(
             actions,
@@ -961,7 +978,8 @@ class TalkTallyApp(tk.Tk):
         listbox = self.mic_listbox if kind == "mic" else self.sys_listbox
         try:
             selected = [
-                int(listbox.get(i)) for i in listbox.curselection()  # type: ignore[arg-type]
+                int(listbox.get(i))
+                for i in listbox.curselection()  # type: ignore[arg-type]
             ]
         except ValueError:
             selected = []
@@ -1225,6 +1243,7 @@ class TalkTallyApp(tk.Tk):
             return
         self._clear_transcript_preview()
         self._set_transcription_status(f"Transcribing {path.name}…")
+        self._transcription_cancelled = False  # Reset cancellation flag
         self._set_transcription_running(True)
         thread = threading.Thread(
             target=self._run_transcription_thread,
@@ -1234,22 +1253,70 @@ class TalkTallyApp(tk.Tk):
         self._transcription_thread = thread
         thread.start()
 
+    def _cancel_transcription(self) -> None:
+        """Cancel the currently running transcription."""
+        if not self._is_transcription_running():
+            return
+
+        self._transcription_cancelled = True
+
+        # Try to terminate the thread gracefully
+        # Note: We can't forcibly kill the subprocess, but we can mark it as cancelled
+        # and handle the cancellation in the completion handlers
+
+        self._set_transcription_status("Cancelling transcription...")
+
+        # The actual cleanup will happen in _finish_transcription_cancelled
+        # which will be called when the thread notices the cancellation
+
     def _run_transcription_thread(self, audio_path: Path) -> None:
         try:
+            # Check for cancellation before starting
+            if self._transcription_cancelled:
+                self.after(0, self._finish_transcription_cancelled)
+                return
+
             result = transcribe_recording(
                 audio_path,
                 cmd=self.dictation_wispr_cmd.get() or "whisper",
                 model=self.transcription_model_var.get() or None,
                 debug=_dbg,
+                cancel_flag=lambda: self._transcription_cancelled,
             )
+
+            # Check for cancellation after completion
+            if self._transcription_cancelled:
+                self.after(0, self._finish_transcription_cancelled)
+                return
+
+        except InterruptedError:
+            # Cancellation was handled, call the cancellation handler
+            self.after(0, self._finish_transcription_cancelled)
+            return
         except Exception as exc:  # noqa: BLE001
             _dbg(f"transcription failed: {exc}")
-            self.after(
-                0,
-                lambda err=exc: self._finish_transcription_error(audio_path, err),
-            )
+            # Check if it was cancelled during the process
+            if self._transcription_cancelled:
+                self.after(0, self._finish_transcription_cancelled)
+            else:
+                self.after(
+                    0,
+                    lambda err=exc: self._finish_transcription_error(audio_path, err),
+                )
             return
         self.after(0, lambda: self._finish_transcription_success(result))
+
+    def _finish_transcription_cancelled(self) -> None:
+        """Handle cancelled transcription."""
+        self._transcription_thread = None
+        self._transcription_cancelled = False
+        self._set_transcription_running(False)
+        self._set_transcription_status("Transcription cancelled.")
+        self._update_transcription_buttons()
+
+        # Play cancellation sound (different from completion)
+        if self.var_sounds.get():
+            self._play_sound("Basso")  # Lower tone for cancellation
 
     def _finish_transcription_success(
         self, result: RecordingTranscriptionResult
@@ -1275,6 +1342,10 @@ class TalkTallyApp(tk.Tk):
         self._refresh_transcription_list()
         self._update_transcription_buttons()
 
+        # Play completion sound
+        if self.var_sounds.get():
+            self._play_sound("Hero")  # Pleasant completion sound
+
     def _finish_transcription_error(self, audio_path: Path, error: Exception) -> None:
         self._transcription_thread = None
         self._set_transcription_running(False)
@@ -1290,11 +1361,13 @@ class TalkTallyApp(tk.Tk):
         if running:
             self.transcription_progress.start(12)
             self.btn_transcribe.configure(state="disabled")
+            self.btn_cancel_transcribe.configure(state="normal")
             self.btn_refresh_transcripts.configure(state="disabled")
             self.btn_open_transcript.configure(state="disabled")
             self.btn_copy_transcript.configure(state="disabled")
         else:
             self.transcription_progress.stop()
+            self.btn_cancel_transcribe.configure(state="disabled")
             self.btn_refresh_transcripts.configure(state="normal")
             self._update_transcription_buttons()
 
@@ -1351,7 +1424,9 @@ class TalkTallyApp(tk.Tk):
     def _open_transcript(self) -> None:
         path = self._get_selected_transcript() or self._last_transcript_path
         if path is None or not path.exists():
-            messagebox.showinfo("Transcript unavailable", "Generate a transcript first.")
+            messagebox.showinfo(
+                "Transcript unavailable", "Generate a transcript first."
+            )
             return
         try:
             subprocess.run(["open", str(path)], check=False)

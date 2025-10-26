@@ -71,26 +71,35 @@ class LocalTranscriber:
             message += f" extra={' '.join(self._extra)}"
         self.debug(message)
 
-    def transcribe(self, audio_path: str | Path) -> str:
-        """Return normalized single-line transcript text."""
+    def transcribe(self, audio_path: str | Path, *, cancel_flag: Callable[[], bool] | None = None) -> str:
+        """Return normalized single-line transcript text.
+        
+        Args:
+            audio_path: Path to the audio file to transcribe
+            cancel_flag: Optional callable that returns True if cancellation is requested
+        """
         src = Path(audio_path)
         if not src.exists():
             raise FileNotFoundError(f"Audio file '{src}' not found.")
 
         cmd_name = Path(self._cmd[0]).name.lower()
         if cmd_name == "whisper":
-            return self._transcribe_whisper(src)
-        return self._transcribe_stdout_tool(src)
+            return self._transcribe_whisper(src, cancel_flag=cancel_flag)
+        return self._transcribe_stdout_tool(src, cancel_flag=cancel_flag)
 
     # ---- whisper CLI ----
-    def _transcribe_whisper(self, audio_path: Path) -> str:
+    def _transcribe_whisper(self, audio_path: Path, *, cancel_flag: Callable[[], bool] | None = None) -> str:
         tmpdir = Path(tempfile.mkdtemp(prefix="talktally_whisper_"))
         txt_path = tmpdir / (audio_path.stem + ".txt")
         json_path = tmpdir / (audio_path.stem + ".json")
         self.debug(f"whisper tmpdir={tmpdir} expect_txt={txt_path.name}")
         try:
             cmd = list(self._cmd) + [str(audio_path)]
-            if self._model and not _contains_model_flag(cmd) and not _contains_model_flag(self._extra):
+            if (
+                self._model
+                and not _contains_model_flag(cmd)
+                and not _contains_model_flag(self._extra)
+            ):
                 cmd.extend(["--model", self._model])
             if self._extra:
                 cmd.extend(self._extra)
@@ -104,12 +113,29 @@ class LocalTranscriber:
                     "False",
                 ]
             )
-            proc = subprocess.run(
+            # Use Popen for cancellable subprocess
+            import time
+            proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                check=False,
             )
+            
+            # Poll for completion or cancellation
+            while proc.poll() is None:
+                if cancel_flag and cancel_flag():
+                    self.debug("whisper cancellation requested, terminating process")
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2.0)  # Give it 2 seconds to terminate gracefully
+                    except subprocess.TimeoutExpired:
+                        proc.kill()  # Force kill if it doesn't terminate
+                        proc.wait()
+                    raise InterruptedError("Transcription cancelled by user")
+                time.sleep(0.1)  # Check every 100ms
+            
+            # Get the final result
+            stdout, stderr = proc.communicate()
         except FileNotFoundError as e:  # noqa: BLE001
             raise RuntimeError(
                 f"Transcriber command '{' '.join(self._cmd)}' not found. "
@@ -121,8 +147,8 @@ class LocalTranscriber:
 
         self.debug(f"whisper rc={proc.returncode}")
         if proc.returncode != 0:
-            err = proc.stderr.decode("utf-8", errors="ignore").strip()
-            out = proc.stdout.decode("utf-8", errors="ignore").strip()
+            err = stderr.decode("utf-8", errors="ignore").strip()
+            out = stdout.decode("utf-8", errors="ignore").strip()
             self.debug(f"whisper stderr: {err}")
             raise RuntimeError(f"whisper failed ({proc.returncode}): {err or out}")
 
@@ -138,7 +164,9 @@ class LocalTranscriber:
                         json_path.read_text(encoding="utf-8", errors="ignore")
                     )
                     segments: Iterable[dict[str, str]] = payload.get("segments", [])
-                    text = " ".join(seg.get("text", "") for seg in segments if seg).strip()
+                    text = " ".join(
+                        seg.get("text", "") for seg in segments if seg
+                    ).strip()
                     self.debug(
                         "whisper json fallback used"
                         if text
@@ -163,27 +191,48 @@ class LocalTranscriber:
         return text.replace("\r", " ").replace("\n", " ").strip()
 
     # ---- stdout tools ----
-    def _transcribe_stdout_tool(self, audio_path: Path) -> str:
+    def _transcribe_stdout_tool(self, audio_path: Path, *, cancel_flag: Callable[[], bool] | None = None) -> str:
         try:
             cmd = list(self._cmd) + [str(audio_path)]
-            if self._model and not _contains_model_flag(cmd) and not _contains_model_flag(self._extra):
+            if (
+                self._model
+                and not _contains_model_flag(cmd)
+                and not _contains_model_flag(self._extra)
+            ):
                 cmd.extend(["--model", self._model])
             if self._extra:
                 cmd.extend(self._extra)
-            proc = subprocess.run(
+            # Use Popen for cancellable subprocess
+            import time
+            proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                check=False,
             )
+            
+            # Poll for completion or cancellation
+            while proc.poll() is None:
+                if cancel_flag and cancel_flag():
+                    self.debug("stdout-tool cancellation requested, terminating process")
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2.0)  # Give it 2 seconds to terminate gracefully
+                    except subprocess.TimeoutExpired:
+                        proc.kill()  # Force kill if it doesn't terminate
+                        proc.wait()
+                    raise InterruptedError("Transcription cancelled by user")
+                time.sleep(0.1)  # Check every 100ms
+            
+            # Get the final result
+            stdout, stderr = proc.communicate()
         except FileNotFoundError as exc:  # noqa: BLE001
             raise RuntimeError(
                 f"Transcriber command '{' '.join(self._cmd)}' not found. "
                 "Set Settings.dictation_wispr_cmd."
             ) from exc
-        out = proc.stdout.decode("utf-8", errors="ignore").strip()
+        out = stdout.decode("utf-8", errors="ignore").strip()
         if proc.returncode != 0:
-            err = proc.stderr.decode("utf-8", errors="ignore").strip()
+            err = stderr.decode("utf-8", errors="ignore").strip()
             self.debug(f"stdout-tool stderr: {err}")
             raise RuntimeError(f"Transcriber failed ({proc.returncode}): {err or out}")
         return out.replace("\r", " ").replace("\n", " ").strip()

@@ -9,7 +9,16 @@ from typing import Callable
 from .common.transcription import LocalTranscriber
 
 
-SUPPORTED_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".aiff", ".aif"}
+SUPPORTED_EXTENSIONS = {
+    ".wav",
+    ".mp3",
+    ".flac",
+    ".m4a",
+    ".aac",
+    ".ogg",
+    ".aiff",
+    ".aif",
+}
 
 
 def list_recordings(directory: Path) -> list[Path]:
@@ -82,9 +91,11 @@ def transcribe_recording(
     debug: Callable[[str], None] | None = None,
     write_text: bool = True,
     overwrite: bool = True,
+    cancel_flag: Callable[[], bool] | None = None,
 ) -> RecordingTranscriptionResult:
     """Transcribe `audio_path` and optionally persist a sibling .txt file."""
     if debug is None:
+
         def _noop(_msg: str) -> None:
             return None
 
@@ -95,7 +106,7 @@ def transcribe_recording(
         model=model,
         debug=debug,
     )
-    text = transcriber.transcribe(audio_path)
+    text = transcriber.transcribe(audio_path, cancel_flag=cancel_flag)
     output: Path | None = None
     if write_text:
         parent_dir = audio_path.parent

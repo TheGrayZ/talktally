@@ -44,7 +44,7 @@ def test_transcribe_recording_writes_text(monkeypatch, tmp_path: Path) -> None:
         def __init__(self, *args, **kwargs):
             captured["init"] = {"args": args, "kwargs": kwargs}
 
-        def transcribe(self, audio_path: Path) -> str:
+        def transcribe(self, audio_path: Path, *, cancel_flag=None) -> str:
             captured["path"] = Path(audio_path)
             return "hello world"
 
@@ -73,7 +73,9 @@ def test_transcribe_recording_writes_text(monkeypatch, tmp_path: Path) -> None:
     assert result.model == "base"
 
 
-def test_transcribe_recording_retains_previous_models(monkeypatch, tmp_path: Path) -> None:
+def test_transcribe_recording_retains_previous_models(
+    monkeypatch, tmp_path: Path
+) -> None:
     recordings_dir = tmp_path / "recordings"
     recordings_dir.mkdir()
     audio = recordings_dir / "sample.wav"
@@ -89,7 +91,7 @@ def test_transcribe_recording_retains_previous_models(monkeypatch, tmp_path: Pat
         def __init__(self, *, model=None, **_kwargs):
             self.model = model
 
-        def transcribe(self, audio_path: Path) -> str:
+        def transcribe(self, audio_path: Path, *, cancel_flag=None) -> str:
             return returns[self.model]
 
     monkeypatch.setattr(
@@ -102,14 +104,27 @@ def test_transcribe_recording_retains_previous_models(monkeypatch, tmp_path: Pat
     third = transcribe_recording(audio, cmd="cmd", model="small.en")
     fourth = transcribe_recording(audio, cmd="cmd", model="base")
 
-    assert first.output_path and second.output_path and third.output_path and fourth.output_path
+    assert (
+        first.output_path
+        and second.output_path
+        and third.output_path
+        and fourth.output_path
+    )
     assert first.output_path.parent == tmp_path / "transcripts"
     assert second.output_path.parent == tmp_path / "transcripts"
     assert third.output_path.parent == tmp_path / "transcripts"
     assert fourth.output_path.parent == tmp_path / "transcripts"
-    assert len(
-        {first.output_path, second.output_path, third.output_path, fourth.output_path}
-    ) == 4
+    assert (
+        len(
+            {
+                first.output_path,
+                second.output_path,
+                third.output_path,
+                fourth.output_path,
+            }
+        )
+        == 4
+    )
     assert first.output_path.name == "sample__tiny.txt"
     assert second.output_path.name == "sample__base.txt"
     assert third.output_path.name == "sample__small.en.txt"

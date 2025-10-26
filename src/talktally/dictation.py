@@ -82,6 +82,8 @@ class DictationAgent:
         self._transcribing = threading.Event()
         self._lock = threading.Lock()
         self._ui_dispatch = ui_dispatch
+        self._current_worker: Optional[threading.Thread] = None
+        self._cleanup_timer: Optional[threading.Timer] = None
 
     # ---- Lifecycle ----
     def start(self) -> None:
@@ -109,10 +111,8 @@ class DictationAgent:
                     stop()
         except Exception:
             pass
-        try:
-            self._dispatch(self._overlay.hide)
-        except Exception:
-            pass
+        # Force cleanup to ensure overlay is hidden and state is reset
+        self._force_cleanup()
 
     def restart(self, settings: Settings) -> None:
         self.stop()
@@ -126,19 +126,19 @@ class DictationAgent:
             try:
                 self._ui_dispatch(fn)
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                _dbg(f"_dispatch: ui_dispatch failed: {e}")
         try:
             from PyObjCTools.AppHelper import callAfter  # type: ignore
 
             callAfter(fn)
             return
-        except Exception:
-            pass
+        except Exception as e:
+            _dbg(f"_dispatch: callAfter failed: {e}")
         try:
             fn()
-        except Exception:
-            pass
+        except Exception as e:
+            _dbg(f"_dispatch: inline execution failed: {e}")
 
     def _start_quartz_hold_listener(self, token: str):  # noqa: ANN001
         import Quartz  # type: ignore
@@ -246,57 +246,207 @@ class DictationAgent:
                 print(f"Dictation: failed to start capture: {e}")
 
     def _on_hold_end(self) -> None:
-        # Stop capture, then transcribe & paste in background
-        try:
-            _dbg("_on_hold_end: stopping capture")
-            wav_path = self._capturer.stop()
-        except Exception as e:  # noqa: BLE001
-            print(f"Dictation: failed to stop capture: {e}")
-            self._dispatch(self._overlay.hide)
+        _dbg("=== _on_hold_end START ===")
+
+        # Prevent concurrent transcriptions
+        if self._transcribing.is_set():
+            _dbg("transcription already in progress; ignoring")
             return
 
-        # Show transcribing HUD while we process
-        self._dispatch(self._overlay.show_transcribing_near_cursor)
+        # Cancel any existing cleanup timer
+        if self._cleanup_timer is not None:
+            self._cleanup_timer.cancel()
+            self._cleanup_timer = None
+
+        # Immediately show transcribing HUD
+        try:
+            self._dispatch(self._overlay.show_transcribing_near_cursor)
+            _dbg("transcribing overlay shown")
+        except Exception as e:
+            _dbg(f"Failed to show transcribing overlay: {e}")
+
+        # Mark transcription as starting
+        self._transcribing.set()
+        _dbg("transcribing flag set")
+
+        # Set up emergency cleanup timer (30 seconds max)
+        def emergency_cleanup():
+            _dbg("EMERGENCY CLEANUP: Worker thread timed out")
+            self._force_cleanup()
+
+        try:
+            self._cleanup_timer = threading.Timer(30.0, emergency_cleanup)
+            self._cleanup_timer.start()
+            _dbg("emergency cleanup timer started (30s)")
+        except Exception as e:
+            _dbg(f"failed to start cleanup timer: {e}")
+            self._cleanup_timer = None
 
         def worker() -> None:
-            if not wav_path:
-                _dbg("no wav_path to transcribe")
-                return
-            # Allow concurrent transcriptions; mark busy for visibility only
-            self._transcribing.set()
+            _dbg("=== WORKER THREAD START ===")
+            wav_path = None
+            transcription_succeeded = False
+
             try:
-                _dbg(f"transcribe begin: cmd={self._cfg.wispr_cmd}")
+                # Stop capture
+                _dbg("worker: stopping capture")
+                wav_path = self._capturer.stop()
+                _dbg(f"worker: capture stopped, wav_path={wav_path}")
+
+            except Exception as e:  # noqa: BLE001
+                _dbg(f"worker: capture stop failed: {e}")
+                print(f"Dictation: failed to stop capture: {e}")
+                return
+
+            if not wav_path:
+                _dbg("worker: no wav_path, skipping transcription")
+                return
+
+            try:
+                _dbg(f"worker: transcribe begin, cmd={self._cfg.wispr_cmd}")
                 transcriber = LocalTranscriber(
                     cmd=self._cfg.wispr_cmd,
                     model=self._cfg.model,
                     debug=_dbg,
                 )
                 text = transcriber.transcribe(wav_path)
-                _dbg(f"transcribe done len={len(text) if text else 0}")
+                _dbg(f"worker: transcribe done, len={len(text) if text else 0}")
+
                 if text:
                     cleaned = text.rstrip()
-                    if not cleaned:
-                        _dbg("transcript empty after trimming; skipping paste")
-                        self._dispatch(self._overlay.hide)
+                    if cleaned:
+                        _dbg(f"worker: pasting text, first20='{cleaned[:20]}'…")
+                        try:
+                            _paste_text(cleaned, append_space=self._cfg.append_space)
+                            transcription_succeeded = True
+                            _dbg("worker: paste succeeded")
+                        except Exception as e:
+                            _dbg(f"worker: paste failed: {e}")
+                            print(f"Dictation: paste failed: {e}")
                     else:
-                        _dbg(f"pasting first20='{cleaned[:20]}'…")
-                        _paste_text(cleaned, append_space=self._cfg.append_space)
-                    # Hide after clipboard has the text
-                    self._dispatch(self._overlay.hide)
+                        _dbg("worker: transcript empty after trimming")
                 else:
-                    _dbg("empty transcript; skipping paste")
-                    self._dispatch(self._overlay.hide)
-            except Exception as e:  # noqa: BLE001
-                print(f"Dictation: transcription failed: {e}")
-            finally:
-                try:
-                    Path(wav_path).unlink(missing_ok=True)
-                except Exception:
-                    pass
-                self._transcribing.clear()
-                _dbg("transcribe finished & cleaned")
+                    _dbg("worker: empty transcript")
 
-        threading.Thread(target=worker, name="DictationTranscribe", daemon=True).start()
+            except Exception as e:  # noqa: BLE001
+                _dbg(f"worker: transcription failed: {e}")
+                print(f"Dictation: transcription failed: {e}")
+
+            finally:
+                _dbg("worker: entering finally block")
+
+                # Clean up temp file
+                try:
+                    if wav_path:
+                        Path(wav_path).unlink(missing_ok=True)
+                        _dbg("worker: temp file deleted")
+                except Exception as e:
+                    _dbg(f"worker: temp file deletion failed: {e}")
+
+                # Hide overlay and clean up state
+                self._cleanup_after_worker(transcription_succeeded)
+                _dbg("=== WORKER THREAD END ===")
+
+        # Start worker thread and keep reference
+        self._current_worker = threading.Thread(
+            target=worker, name="DictationTranscribe", daemon=True
+        )
+        self._current_worker.start()
+        _dbg("=== _on_hold_end END ===")
+
+    def _cleanup_after_worker(self, transcription_succeeded: bool) -> None:
+        """Clean up after worker thread completes normally."""
+        _dbg("_cleanup_after_worker: starting cleanup")
+
+        # Cancel emergency cleanup timer
+        if self._cleanup_timer is not None:
+            self._cleanup_timer.cancel()
+            self._cleanup_timer = None
+            _dbg("cleanup: emergency timer cancelled")
+
+        # Hide overlay with multiple attempts
+        overlay_hidden = False
+        for attempt in range(3):
+            try:
+                self._dispatch(self._overlay.hide)
+                overlay_hidden = True
+                _dbg(f"cleanup: overlay hidden via dispatch (attempt {attempt + 1})")
+                break
+            except Exception as e:
+                _dbg(f"cleanup: overlay hide attempt {attempt + 1} failed: {e}")
+                if attempt == 2:  # Last attempt
+                    try:
+                        self._overlay.hide()
+                        overlay_hidden = True
+                        _dbg("cleanup: overlay hidden via direct call")
+                    except Exception as e2:
+                        _dbg(f"cleanup: direct overlay hide failed: {e2}")
+
+        if not overlay_hidden:
+            _dbg("cleanup: WARNING - overlay may still be visible!")
+
+        # Clear transcription flag
+        self._transcribing.clear()
+        self._current_worker = None
+
+        status = "succeeded" if transcription_succeeded else "failed/empty"
+        _dbg(f"_cleanup_after_worker: complete - {status}")
+
+    def _force_cleanup(self) -> None:
+        """Emergency cleanup when worker thread times out or fails."""
+        _dbg("_force_cleanup: FORCING cleanup due to timeout/failure")
+
+        # Cancel timer
+        if self._cleanup_timer is not None:
+            self._cleanup_timer.cancel()
+            self._cleanup_timer = None
+
+        # Force hide overlay - try all methods
+        methods_tried = []
+        overlay_hidden = False
+
+        # Method 1: Try dispatch
+        try:
+            self._dispatch(self._overlay.hide)
+            overlay_hidden = True
+            methods_tried.append("dispatch")
+            _dbg("force_cleanup: overlay hidden via dispatch")
+        except Exception as e:
+            methods_tried.append(f"dispatch(failed: {e})")
+
+        # Method 2: Direct call
+        if not overlay_hidden:
+            try:
+                self._overlay.hide()
+                overlay_hidden = True
+                methods_tried.append("direct")
+                _dbg("force_cleanup: overlay hidden via direct call")
+            except Exception as e:
+                methods_tried.append(f"direct(failed: {e})")
+
+        # Method 3: Try to access overlay window directly (last resort)
+        if not overlay_hidden:
+            try:
+                if (
+                    hasattr(self._overlay, "_window")
+                    and self._overlay._window is not None
+                ):
+                    self._overlay._window.orderOut_(None)
+                    overlay_hidden = True
+                    methods_tried.append("direct_window")
+                    _dbg("force_cleanup: overlay hidden via direct window access")
+            except Exception as e:
+                methods_tried.append(f"direct_window(failed: {e})")
+
+        _dbg(
+            f"force_cleanup: methods tried: {methods_tried}, success: {overlay_hidden}"
+        )
+
+        # Clear all state
+        self._transcribing.clear()
+        self._current_worker = None
+
+        _dbg("_force_cleanup: emergency cleanup complete")
 
 
 # ---- Helpers ----
@@ -375,40 +525,92 @@ class _MicCapturer:
         if self._stream is None:
             _dbg("MicCapturer.stop called when not running")
             return self._tmp_path
-        self._stop.set()
+
+        result_path = self._tmp_path
+        _dbg("MicCapturer.stop: beginning stop sequence")
+
+        # Always clean up, even if exceptions occur
         try:
-            self._stream.stop()
-        finally:
-            self._stream.close()
-            self._stream = None
-        # Signal writer to finish
-        sentinel = np.array([])
-        try:
-            self._q.put(sentinel, timeout=1.0)
-        except queue.Full:
-            _dbg("MicCapturer.stop queue full; draining before signalling")
-            drained = False
-            while True:
+            self._stop.set()
+
+            # Stop and close stream
+            if self._stream is not None:
                 try:
-                    _ = self._q.get_nowait()
-                    drained = True
-                except queue.Empty:
-                    break
+                    self._stream.stop()
+                    _dbg("MicCapturer.stop: stream stopped")
+                except Exception as e:
+                    _dbg(f"MicCapturer.stop: stream.stop() failed: {e}")
+                try:
+                    self._stream.close()
+                    _dbg("MicCapturer.stop: stream closed")
+                except Exception as e:
+                    _dbg(f"MicCapturer.stop: stream.close() failed: {e}")
+                finally:
+                    self._stream = None
+
+            # Signal writer to finish
+            sentinel = np.array([])
             try:
-                self._q.put_nowait(sentinel)
+                self._q.put(sentinel, timeout=1.0)
+                _dbg("MicCapturer.stop: sentinel sent")
             except queue.Full:
-                if not drained:
-                    _dbg("MicCapturer.stop: unable to enqueue sentinel; proceeding")
-        if self._writer is not None:
-            self._writer.join(timeout=1.5)
-        if self._f is not None:
-            try:
-                self._f.close()
-            except Exception:
-                pass
+                _dbg("MicCapturer.stop queue full; draining before signalling")
+                drained = False
+                drain_count = 0
+                while True:
+                    try:
+                        _ = self._q.get_nowait()
+                        drained = True
+                        drain_count += 1
+                    except queue.Empty:
+                        break
+                _dbg(f"MicCapturer.stop: drained {drain_count} items from queue")
+                try:
+                    self._q.put_nowait(sentinel)
+                    _dbg("MicCapturer.stop: sentinel sent after draining")
+                except queue.Full:
+                    if not drained:
+                        _dbg("MicCapturer.stop: unable to enqueue sentinel; proceeding")
+
+            # Wait for writer thread to finish
+            if self._writer is not None:
+                try:
+                    self._writer.join(timeout=1.5)
+                    if self._writer.is_alive():
+                        _dbg("MicCapturer.stop: writer thread did not finish in time")
+                    else:
+                        _dbg("MicCapturer.stop: writer thread finished")
+                except Exception as e:
+                    _dbg(f"MicCapturer.stop: writer.join() failed: {e}")
+                finally:
+                    self._writer = None
+
+            # Close and reset file handle
+            if self._f is not None:
+                try:
+                    self._f.close()
+                    _dbg("MicCapturer.stop: file closed")
+                except Exception as e:
+                    _dbg(f"MicCapturer.stop: file.close() failed: {e}")
+                finally:
+                    self._f = None
+
+        except Exception as e:
+            _dbg(f"MicCapturer.stop: unexpected error during cleanup: {e}")
+        finally:
+            # CRITICAL: Reset all state completely for next use
+            self._stream = None
+            self._writer = None
             self._f = None
-        _dbg(f"MicCapturer stopped -> {self._tmp_path}")
-        return self._tmp_path
+            self._tmp_path = None
+
+            # Create fresh queue and stop event to prevent state corruption
+            self._q = queue.Queue(maxsize=200)
+            self._stop = threading.Event()
+            _dbg("MicCapturer.stop: state reset complete")
+
+        _dbg(f"MicCapturer stopped -> {result_path}")
+        return result_path
 
     def is_running(self) -> bool:
         return self._stream is not None
@@ -608,11 +810,7 @@ def _paste_text(s: str, *, append_space: bool = False) -> None:
             return False
 
     def _send_space_system_events() -> bool:
-        osa = (
-            'tell application "System Events"\n'
-            "  key code 49\n"
-            "end tell"
-        )
+        osa = 'tell application "System Events"\n  key code 49\nend tell'
         try:
             proc = subprocess.run(
                 ["osascript", "-l", "AppleScript", "-e", osa],
@@ -632,7 +830,9 @@ def _paste_text(s: str, *, append_space: bool = False) -> None:
             _dbg(f"System Events space error: {exc}")
             return False
 
-    pasteboard_type = getattr(AppKit, "NSPasteboardTypeString", "public.utf8-plain-text")
+    pasteboard_type = getattr(
+        AppKit, "NSPasteboardTypeString", "public.utf8-plain-text"
+    )
 
     # If accessibility permissions are missing, CGEvent posts are ignored. Fall back immediately.
     try:
@@ -704,11 +904,7 @@ def _paste_text(s: str, *, append_space: bool = False) -> None:
 
 
 def _send_space_applescript() -> None:
-    osa = (
-        'tell application "System Events"\n'
-        "  key code 49\n"
-        "end tell"
-    )
+    osa = 'tell application "System Events"\n  key code 49\nend tell'
     try:
         proc = subprocess.run(
             ["osascript", "-l", "AppleScript", "-e", osa],
@@ -817,9 +1013,7 @@ def _paste_text_accessibility(s: str, *, append_space: bool = False) -> bool:
             focused, Quartz.kAXSelectedTextRangeAttribute
         )
         if err == kAXErrorSuccess and range_val is not None:
-            ok, rng = Quartz.AXValueGetValue(
-                range_val, Quartz.kAXValueCFRangeType
-            )
+            ok, rng = Quartz.AXValueGetValue(range_val, Quartz.kAXValueCFRangeType)
             if ok and isinstance(rng, tuple) and len(rng) == 2:
                 start, length = int(rng[0]), int(rng[1])
     except Exception:
@@ -838,16 +1032,17 @@ def _paste_text_accessibility(s: str, *, append_space: bool = False) -> bool:
         focused, Quartz.kAXValueAttribute, new_value
     )
     if err != kAXErrorSuccess:
-        if hasattr(Quartz, "kAXErrorNotAuthorized") and err == Quartz.kAXErrorNotAuthorized:
+        if (
+            hasattr(Quartz, "kAXErrorNotAuthorized")
+            and err == Quartz.kAXErrorNotAuthorized
+        ):
             _warn_accessibility_permissions()
         _dbg(f"AX paste: failed to set value (err={err})")
         return False
 
     try:
         new_loc = start + len(insert)
-        new_range = Quartz.AXValueCreate(
-            Quartz.kAXValueCFRangeType, (new_loc, 0)
-        )
+        new_range = Quartz.AXValueCreate(Quartz.kAXValueCFRangeType, (new_loc, 0))
         if new_range is not None:
             Quartz.AXUIElementSetAttributeValue(
                 focused, Quartz.kAXSelectedTextRangeAttribute, new_range

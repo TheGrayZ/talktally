@@ -52,10 +52,10 @@ TALKTALLY_DEBUG=1 talktally-gui
 
 ## macOS system‑audio setup (Aggregate Device)
 
-To record “system audio” (what you hear from apps), create an Aggregate Device that combines a loopback driver with your microphone:
+To record "system audio" (what you hear from apps), create an Aggregate Device that combines a loopback driver with your microphone:
 
 1) Install a loopback device such as BlackHole 2ch (see the BlackHole docs; commonly installed via Homebrew).
-2) Open “Audio MIDI Setup” and create an Aggregate Device that includes:
+2) Open "Audio MIDI Setup" and create an Aggregate Device that includes:
    - BlackHole 2ch (provides system audio on input channels 0 and 1)
    - Your microphone (often appears as the next input channel)
 3) In TalkTally:
@@ -74,7 +74,7 @@ Notes:
 2) Map channel indices for Mic and System. Hold Cmd/Ctrl to select multiple in the list.
 3) Choose outputs (Mic, System, Mixed), file names, and output directory.
 4) Pick a file format and encoding options. A per‑minute storage estimate is shown.
-5) Click “Record” (or use the global hotkey) to start; click “Stop” to finish.
+5) Click "Record" (or use the global hotkey) to start; click "Stop" to finish.
 
 Output files:
 - Saved under `<output_dir>/recordings/`
@@ -86,7 +86,7 @@ Overlay and sounds:
 - Optional start/stop sounds can be enabled in Settings
 
 Global hotkey:
-- Enable in “Hotkey & Dictation”; default is `cmd+shift+r`
+- Enable in "Hotkey & Dictation"; default is `cmd+shift+r`
 - On macOS, TalkTally prefers a Quartz hotkey listener; otherwise it falls back to `pynput`
 
 
@@ -94,7 +94,7 @@ Global hotkey:
 
 Dictation lets you hold a key to capture a short mic snippet, transcribe it locally, and paste the text into the focused app.
 
-- Enable “Dictation (press & hold)” in Hotkey & Dictation
+- Enable "Dictation (press & hold)" in Hotkey & Dictation
 - Choose the hold key (default: right Option) and transcriber command (default: `whisper`)
 - Choose a Whisper model (e.g., `tiny`, `base`, `small`, `medium`, `large`)
 - A small HUD dot appears near the cursor while recording (red) and while transcribing (orange)
@@ -108,9 +108,9 @@ Requirements and permissions:
 
 ## Transcribe existing recordings
 
-Use the “Transcribe Recordings” panel:
+Use the "Transcribe Recordings" panel:
 - Lists audio files from `<output_dir>/recordings/` (and optionally the output folder)
-- Select a recording, pick a model, and click “Transcribe”
+- Select a recording, pick a model, and click "Transcribe"
 - Transcript `.txt` files are saved under `<output_dir>/transcripts/`
 - Filenames include a model token, e.g., `my_take__tiny.txt`; multiple runs add `(2)`, `(3)`, etc.
 - You can open or copy the transcript text from within the app
@@ -121,7 +121,7 @@ Use the “Transcribe Recordings” panel:
 - WAV:
   - 44.1 kHz or 48 kHz; 16‑bit or 24‑bit; channel count per output as configured
 - MP3:
-  - 96–320 kbps CBR using FFmpeg’s `libmp3lame`
+  - 96–320 kbps CBR using FFmpeg's `libmp3lame`
 - FLAC:
   - Level 0–8; size varies with the chosen level
 
